@@ -1,0 +1,16 @@
+# Ignore generated environment variables and secrets
+.env
+
+# Ignore generated Docker Compose file
+docker-compose.yml
+
+# Ignore generated management script
+manage.sh
+
+# Ignore all application data, databases, and configs
+configs/
+data/
+
+# OS generated files
+.DS_Store
+Thumbs.db
