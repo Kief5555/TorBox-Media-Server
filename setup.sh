@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 # ============================================================================
 #  TorBox Media Server - All-in-One Setup Script
@@ -23,11 +24,17 @@ COMPOSE_FILE="${INSTALL_DIR}/docker-compose.yml"
 
 # Generate deterministic-length API keys (32-char hex, matching *arr format)
 generate_api_key() {
-    local key
+    local key=""
     key=$(openssl rand -hex 16 2>/dev/null) \
         || key=$(xxd -p -l 16 /dev/urandom 2>/dev/null) \
         || key=$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \t\n') \
         || key=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \t\n')
+    # Normalize: lowercase, strip non-hex, take first 32 chars
+    key=$(echo "$key" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-f0-9' | head -c 32)
+    if [[ ${#key} -ne 32 ]]; then
+        echo ""
+        return 1
+    fi
     echo "$key"
 }
 
@@ -58,6 +65,73 @@ log_warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $*"; }
 log_step()    { echo -e "${BLUE}[STEP]${NC} ${BOLD}$*${NC}"; }
 log_section() { echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"; echo -e "${CYAN}  $*${NC}"; echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"; }
+mask_key()    { local k="$1"; if [[ ${#k} -gt 4 ]]; then echo "${k:0:4}...${k: -4}"; else echo "$k"; fi; }
+
+# Service port registry (single source of truth for all port/label references)
+SVC_ORDER=(decypharr prowlarr byparr radarr sonarr seerr)
+declare -A SVC_PORTS=(
+    [decypharr]=8282 [prowlarr]=9696 [byparr]=8191
+    [radarr]=7878 [sonarr]=8989 [seerr]=5055
+)
+declare -A SVC_LABELS=(
+    [decypharr]="Decypharr" [prowlarr]="Prowlarr" [byparr]="Byparr"
+    [radarr]="Radarr" [sonarr]="Sonarr" [seerr]="Seerr"
+)
+
+print_service_urls() {
+    local svc
+    for svc in "${SVC_ORDER[@]}"; do
+        printf "  %b%-14s%b http://localhost:%s\n" "$BOLD" "${SVC_LABELS[$svc]}" "$NC" "${SVC_PORTS[$svc]}"
+    done
+    if [[ "$MEDIA_SERVER" == "plex" ]]; then
+        printf "  %b%-14s%b http://localhost:32400/web\n" "$BOLD" "Plex" "$NC"
+    else
+        printf "  %b%-14s%b http://localhost:8096\n" "$BOLD" "Jellyfin" "$NC"
+    fi
+}
+
+# Run a command in the background with a spinner animation
+run_with_spinner() {
+    local msg="$1"; shift
+    local spin_chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local tmpfile; tmpfile=$(mktemp)
+    "$@" > "$tmpfile" 2>&1 &
+    local pid=$! i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r  %s %s" "${spin_chars:i%${#spin_chars}:1}" "$msg"
+        i=$((i + 1))
+        sleep 0.1
+    done
+    local rc=0
+    wait "$pid" && rc=0 || rc=$?
+    printf "\r  %-$((${#msg} + 4))s\r" ""
+    if [[ $rc -ne 0 ]]; then cat "$tmpfile" >&2; fi
+    rm -f "$tmpfile"
+    return "$rc"
+}
+
+# Detect the correct docker compose command and store in COMPOSE_CMD array
+COMPOSE_CMD=()
+_COMPOSE_SUDO_WARNED=false
+detect_compose_cmd() {
+    if docker info &>/dev/null 2>&1; then
+        if docker compose version &>/dev/null 2>&1; then
+            COMPOSE_CMD=(docker compose)
+        else
+            COMPOSE_CMD=(docker-compose)
+        fi
+    else
+        if [[ "$_COMPOSE_SUDO_WARNED" != "true" ]]; then
+            log_warn "Docker socket not accessible in current shell — using sudo."
+            _COMPOSE_SUDO_WARNED=true
+        fi
+        if sudo docker compose version &>/dev/null 2>&1; then
+            COMPOSE_CMD=(sudo docker compose)
+        else
+            COMPOSE_CMD=(sudo docker-compose)
+        fi
+    fi
+}
 
 # ============================================================================
 #  Dependency Checks
@@ -104,7 +178,19 @@ check_dependencies() {
             log_warn "Docker daemon is not running. Starting it..."
             sudo systemctl start docker 2>/dev/null || true
             sudo systemctl enable docker 2>/dev/null || true
-            sleep 2
+            # Wait for Docker daemon to be ready (up to 15 seconds)
+            local docker_wait=0
+            local spin_chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+            while [[ $docker_wait -lt 15 ]]; do
+                if sudo docker info &>/dev/null 2>&1; then
+                    printf "\r  %-50s\r" ""
+                    break
+                fi
+                printf "\r  %s Waiting for Docker daemon... %ds/15s" "${spin_chars:docker_wait%${#spin_chars}:1}" "$docker_wait"
+                sleep 1
+                docker_wait=$((docker_wait + 1))
+            done
+            printf "\r  %-50s\r" ""
         fi
         if ! sudo docker info &>/dev/null 2>&1; then
             log_error "Failed to connect to Docker. Please start Docker manually and re-run."
@@ -134,16 +220,30 @@ check_dependencies() {
     fi
     log_info "FUSE support available."
 
-    # Check for port conflicts
-    local ports_to_check=(8282 9696 8191 7878 8989 5055)
-    local port_names=("Decypharr" "Prowlarr" "Byparr" "Radarr" "Sonarr" "Seerr")
-    if [[ "${MEDIA_SERVER:-jellyfin}" == "jellyfin" ]]; then
-        ports_to_check+=(8096)
-        port_names+=("Jellyfin")
+}
+
+check_port_conflicts() {
+    local ports_to_check=() port_names=() svc
+    for svc in "${SVC_ORDER[@]}"; do
+        ports_to_check+=("${SVC_PORTS[$svc]}")
+        port_names+=("${SVC_LABELS[$svc]}")
+    done
+    if [[ "$MEDIA_SERVER" == "plex" ]]; then
+        ports_to_check+=(32400)
+        port_names+=("Plex")
+    elif [[ "$MEDIA_SERVER" == "jellyfin" ]]; then
+        ports_to_check+=(8096 8920)
+        port_names+=("Jellyfin" "Jellyfin HTTPS")
     fi
     local conflicts=false
     for i in "${!ports_to_check[@]}"; do
-        if ss -tlnp 2>/dev/null | grep -q ":${ports_to_check[$i]} " 2>/dev/null; then
+        local port_in_use=false
+        if command -v ss &>/dev/null; then
+            ss -tlnp 2>/dev/null | grep -q ":${ports_to_check[$i]} " 2>/dev/null && port_in_use=true
+        elif command -v netstat &>/dev/null; then
+            netstat -tlnp 2>/dev/null | grep -q ":${ports_to_check[$i]} " 2>/dev/null && port_in_use=true
+        fi
+        if [[ "$port_in_use" == "true" ]]; then
             log_warn "Port ${ports_to_check[$i]} (${port_names[$i]}) is already in use."
             conflicts=true
         fi
@@ -252,6 +352,12 @@ gather_config() {
             log_error "API key cannot be empty."
         done
     fi
+    # Validate API key with allowlist — only safe characters permitted
+    if [[ ! "$TORBOX_API_KEY" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        log_error "API key contains invalid characters. Only alphanumeric characters, dots, hyphens, and underscores are allowed."
+        log_error "Please copy it directly from https://torbox.app/settings"
+        exit 1
+    fi
     log_info "API key received (${#TORBOX_API_KEY} characters, ending in ...${TORBOX_API_KEY: -4})."
 
     echo ""
@@ -278,6 +384,11 @@ gather_config() {
         echo "  Press Enter to skip."
         read -rp "  Plex claim token: " PLEX_CLAIM
         PLEX_CLAIM="${PLEX_CLAIM:-}"
+        if [[ -n "$PLEX_CLAIM" && ! "$PLEX_CLAIM" =~ ^claim-[a-zA-Z0-9_-]+$ ]]; then
+            log_error "Invalid Plex claim token format. Tokens start with 'claim-' followed by alphanumeric characters."
+            log_error "Please copy it directly from https://www.plex.tv/claim/"
+            exit 1
+        fi
     fi
 
     echo ""
@@ -294,8 +405,20 @@ gather_config() {
             MOUNT_DIR="/mnt/torbox-media"
             continue
         fi
-        if [[ "$MOUNT_DIR" == "/" || "$MOUNT_DIR" == "/etc" || "$MOUNT_DIR" == "/home" || "$MOUNT_DIR" == "/usr" || "$MOUNT_DIR" == "/var" || "$MOUNT_DIR" == "/tmp" ]]; then
-            log_error "'${MOUNT_DIR}' is a system directory. Please choose a dedicated path."
+        # Block system directory prefixes
+        local blocked=false
+        for prefix in /etc /usr /var /tmp /proc /sys /dev /boot /sbin /bin /lib /run; do
+            if [[ "$MOUNT_DIR" == "$prefix" || "$MOUNT_DIR" == "$prefix"/* ]]; then
+                log_error "'${MOUNT_DIR}' is under a system directory. Please choose a dedicated path."
+                MOUNT_DIR="/mnt/torbox-media"
+                blocked=true
+                break
+            fi
+        done
+        [[ "$blocked" == "true" ]] && continue
+        # Reject unsafe characters in mount path
+        if [[ "$MOUNT_DIR" =~ [^a-zA-Z0-9_./-] ]]; then
+            log_error "Mount path contains unsafe characters. Use only alphanumeric, dots, hyphens, underscores, and slashes."
             MOUNT_DIR="/mnt/torbox-media"
             continue
         fi
@@ -327,7 +450,18 @@ gather_config() {
     echo -e "${BOLD}Timezone${NC}: ${TZ}"
     read -rp "  Use this timezone? [Y/n]: " use_tz
     if [[ "${use_tz,,}" == "n" ]]; then
-        read -rp "  Enter timezone (e.g., America/New_York): " TZ
+        while true; do
+            read -rp "  Enter timezone (e.g., America/New_York): " TZ
+            # Validate against known timezones if timedatectl is available
+            if timedatectl list-timezones 2>/dev/null | grep -qx "$TZ"; then
+                break
+            elif [[ "$TZ" =~ ^[a-zA-Z_/+-]+$ ]]; then
+                log_warn "Could not verify timezone '$TZ' against system list. Using it anyway."
+                break
+            else
+                log_error "Invalid timezone format. Use format like 'America/New_York' or 'UTC'."
+            fi
+        done
     fi
 
     # Generate or preserve API keys for the *arr services
@@ -372,6 +506,21 @@ gather_config() {
     echo ""
     log_info "Configuration complete."
     log_info "Generated API keys for Radarr, Sonarr, and Prowlarr."
+
+    # Show confirmation summary
+    log_section "Configuration Summary"
+    echo -e "  ${BOLD}TorBox API Key:${NC}    ...${TORBOX_API_KEY: -4}"
+    echo -e "  ${BOLD}Media Server:${NC}      ${MEDIA_SERVER}"
+    echo -e "  ${BOLD}Mount Directory:${NC}   ${MOUNT_DIR}"
+    echo -e "  ${BOLD}PUID/PGID:${NC}         ${PUID}:${PGID}"
+    echo -e "  ${BOLD}Timezone:${NC}          ${TZ}"
+    echo -e "  ${BOLD}HW Acceleration:${NC}   ${HW_ACCEL}"
+    echo ""
+    read -rp "Proceed with these settings? [Y/n]: " confirm_config
+    if [[ "${confirm_config,,}" == "n" ]]; then
+        log_info "Setup cancelled."
+        exit 0
+    fi
 }
 
 # ============================================================================
@@ -397,14 +546,15 @@ create_directories() {
 
     # Ensure mount point supports shared propagation for rclone FUSE mounts
     log_step "Setting up mount propagation..."
-    sudo mount --bind "${MOUNT_DIR}" "${MOUNT_DIR}" 2>/dev/null || true
+    if ! findmnt -n "${MOUNT_DIR}" &>/dev/null; then
+        sudo mount --bind "${MOUNT_DIR}" "${MOUNT_DIR}" 2>/dev/null || true
+    fi
     sudo mount --make-shared "${MOUNT_DIR}" 2>/dev/null || true
-    log_info "Mount propagation configured."
-
-    # If the user specified custom PUID/PGID, fix ownership so containers can write
-    if [[ "${PUID}" != "$(id -u)" || "${PGID}" != "$(id -g)" ]]; then
-        log_step "Applying custom PUID/PGID ownership to directories..."
-        sudo chown -R "${PUID}:${PGID}" "${CONFIG_DIR}" "${DATA_DIR}"
+    if findmnt -n -o PROPAGATION "${MOUNT_DIR}" 2>/dev/null | grep -q "shared"; then
+        log_info "Mount propagation configured (shared)."
+    else
+        log_warn "Mount propagation may not be active. Decypharr's FUSE mounts might not be visible to other containers."
+        log_warn "If media files aren't visible in Plex/Jellyfin, see the troubleshooting section in README."
     fi
 
     log_info "Directories created at: ${INSTALL_DIR}"
@@ -416,6 +566,11 @@ create_directories() {
 
 generate_decypharr_config() {
     log_step "Generating Decypharr configuration..."
+
+    if [[ -f "${CONFIG_DIR}/decypharr/config.json" ]]; then
+        log_info "Decypharr config already exists. Preserving user customizations."
+        return 0
+    fi
 
     cat > "${CONFIG_DIR}/decypharr/config.json" << DECYPHARR_EOF
 {
@@ -457,6 +612,11 @@ generate_arr_configs() {
             prowlarr) arr_key="${PROWLARR_API_KEY}" ;;
         esac
         if [[ -f "$arr_dir" ]]; then
+            # Validate key is pure hex before using in sed replacement
+            if [[ ! "$arr_key" =~ ^[0-9a-f]{32}$ ]]; then
+                log_warn "  API key for ${arr_name} is not valid hex. Regenerating."
+                arr_key="$(generate_api_key)"
+            fi
             sed -i "s|<ApiKey>.*</ApiKey>|<ApiKey>${arr_key}</ApiKey>|" "$arr_dir"
             log_info "  Updated API key in existing ${arr_name} config.xml (other settings preserved)."
         fi
@@ -524,9 +684,9 @@ PROWLARR_XML_EOF
     fi
 
     log_info "Pre-seeded config.xml for Radarr, Sonarr, and Prowlarr."
-    log_info "  Radarr  API key: ${RADARR_API_KEY}"
-    log_info "  Sonarr  API key: ${SONARR_API_KEY}"
-    log_info "  Prowlarr API key: ${PROWLARR_API_KEY}"
+    log_info "  Radarr  API key: $(mask_key "${RADARR_API_KEY}")"
+    log_info "  Sonarr  API key: $(mask_key "${SONARR_API_KEY}")"
+    log_info "  Prowlarr API key: $(mask_key "${PROWLARR_API_KEY}")"
 }
 
 # ============================================================================
@@ -607,13 +767,19 @@ COMPOSE_HEADER
       - PGID=\${PGID}
       - UMASK=002
     volumes:
-      - ${CONFIG_DIR}/decypharr:/app
-      - ${MOUNT_DIR}:/mnt/remote:rshared
-      - ${DATA_DIR}:/data
+      - "${CONFIG_DIR}/decypharr:/app"
+      - "${MOUNT_DIR}:/mnt/remote:rshared"
+      - "${DATA_DIR}:/data"
     devices:
       - /dev/fuse:/dev/fuse:rwm
     cap_add:
       - SYS_ADMIN
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8282"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     logging:
       driver: json-file
       options:
@@ -644,8 +810,14 @@ COMPOSE_HEADER
         max-file: "3"
     depends_on:
       - byparr
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9696/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     volumes:
-      - ${CONFIG_DIR}/prowlarr:/config
+      - "${CONFIG_DIR}/prowlarr:/config"
 
   # ── Byparr ────────────────────────────────────────────────────
   # Cloudflare bypass proxy (Byparr - drop-in FlareSolverr replacement).
@@ -666,6 +838,12 @@ COMPOSE_HEADER
       - LOG_LEVEL=info
       - LOG_HTML=false
       - TZ=\${TZ}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8191"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ── Radarr ─────────────────────────────────────────────────────
   # Movie management - searches, grabs, and organizes movies.
@@ -689,10 +867,16 @@ COMPOSE_HEADER
         max-file: "3"
     depends_on:
       - decypharr
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7878/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     volumes:
-      - ${CONFIG_DIR}/radarr:/config
-      - ${DATA_DIR}:/data
-      - ${MOUNT_DIR}:/mnt/remote:rslave
+      - "${CONFIG_DIR}/radarr:/config"
+      - "${DATA_DIR}:/data"
+      - "${MOUNT_DIR}:/mnt/remote:rslave"
 
   # ── Sonarr ─────────────────────────────────────────────────────
   # TV show management - searches, grabs, and organizes series.
@@ -716,10 +900,16 @@ COMPOSE_HEADER
         max-file: "3"
     depends_on:
       - decypharr
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8989/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     volumes:
-      - ${CONFIG_DIR}/sonarr:/config
-      - ${DATA_DIR}:/data
-      - ${MOUNT_DIR}:/mnt/remote:rslave
+      - "${CONFIG_DIR}/sonarr:/config"
+      - "${DATA_DIR}:/data"
+      - "${MOUNT_DIR}:/mnt/remote:rslave"
 
   # ── Seerr ───────────────────────────────────────────────────────
   # Media request & discovery frontend. Users request movies/shows
@@ -740,8 +930,14 @@ COMPOSE_HEADER
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5055"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     volumes:
-      - ${CONFIG_DIR}/seerr:/app/config
+      - "${CONFIG_DIR}/seerr:/app/config"
 
 COMPOSE_EOF
 
@@ -766,10 +962,16 @@ COMPOSE_EOF
       - TZ=\${TZ}
       - VERSION=docker
       - PLEX_CLAIM=\${PLEX_CLAIM:-}${NVIDIA_ENV}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:32400/identity"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     volumes:
-      - ${CONFIG_DIR}/plex:/config
-      - ${DATA_DIR}:/data
-      - ${MOUNT_DIR}:/mnt/remote:rslave
+      - "${CONFIG_DIR}/plex:/config"
+      - "${DATA_DIR}:/data"
+      - "${MOUNT_DIR}:/mnt/remote:rslave"
     logging:
       driver: json-file
       options:
@@ -805,16 +1007,22 @@ COMPOSE_PLEX_HW
     networks:
       - media-network
     ports:
-      - "8096:8096"
-      - "8920:8920"
+      - "127.0.0.1:8096:8096"
+      - "127.0.0.1:8920:8920"
     environment:
       - PUID=\${PUID}
       - PGID=\${PGID}
       - TZ=\${TZ}${NVIDIA_ENV}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8096/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     volumes:
-      - ${CONFIG_DIR}/jellyfin:/config
-      - ${DATA_DIR}:/data
-      - ${MOUNT_DIR}:/mnt/remote:rslave
+      - "${CONFIG_DIR}/jellyfin:/config"
+      - "${DATA_DIR}:/data"
+      - "${MOUNT_DIR}:/mnt/remote:rslave"
     logging:
       driver: json-file
       options:
@@ -841,7 +1049,16 @@ COMPOSE_JF_HW
         fi
     fi
 
+    chmod 600 "${COMPOSE_FILE}"
     log_info "Docker Compose file written."
+
+    # Validate the generated Compose file
+    detect_compose_cmd
+    if run_with_spinner "Validating Docker Compose file..." "${COMPOSE_CMD[@]}" --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" config -q; then
+        log_info "Docker Compose file validated successfully."
+    else
+        log_warn "Docker Compose validation failed. The generated file may have issues."
+    fi
 }
 
 # ============================================================================
@@ -866,15 +1083,48 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Service port registry
+SVC_ORDER=(decypharr prowlarr byparr radarr sonarr seerr)
+declare -A SVC_PORTS=(
+    [decypharr]=8282 [prowlarr]=9696 [byparr]=8191
+    [radarr]=7878 [sonarr]=8989 [seerr]=5055
+)
+declare -A SVC_LABELS=(
+    [decypharr]="Decypharr" [prowlarr]="Prowlarr" [byparr]="Byparr"
+    [radarr]="Radarr" [sonarr]="Sonarr" [seerr]="Seerr"
+)
+
+# Safely read a value from .env without executing shell code
+env_val() {
+    local key="$1"
+    grep "^${key}=" "${ENV_FILE}" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'"
+}
+
 compose_cmd() {
-    local CMD_PREFIX=""
-    if ! docker info &>/dev/null 2>&1; then
-        CMD_PREFIX="sudo "
-    fi
-    if docker compose version &>/dev/null 2>&1; then
-        ${CMD_PREFIX}docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
+    local -a cmd
+    if docker info &>/dev/null 2>&1; then
+        if docker compose version &>/dev/null 2>&1; then
+            cmd=(docker compose)
+        else
+            cmd=(docker-compose)
+        fi
     else
-        ${CMD_PREFIX}docker-compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
+        if sudo docker compose version &>/dev/null 2>&1; then
+            cmd=(sudo docker compose)
+        else
+            cmd=(sudo docker-compose)
+        fi
+    fi
+    "${cmd[@]}" --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
+}
+
+ensure_mount_propagation() {
+    local mount_dir
+    mount_dir="$(env_val MOUNT_DIR)"
+    if [[ -n "${mount_dir}" ]]; then
+        echo -e "${YELLOW}Requesting sudo privileges to re-apply FUSE mounts...${NC}"
+        sudo mount --bind "${mount_dir}" "${mount_dir}" 2>/dev/null || true
+        sudo mount --make-shared "${mount_dir}" 2>/dev/null || true
     fi
 }
 
@@ -897,22 +1147,23 @@ show_help() {
     echo "  keys        Show API keys"
     echo "  enable      Enable auto-start on boot"
     echo "  disable     Disable auto-start on boot"
+    echo "  backup      Back up configs and .env"
+    echo "  health      Check health of all services"
+    echo "  shell <svc> Open a shell in a service container"
     echo "  help        Show this help"
 }
 
 show_urls() {
-    source "${ENV_FILE}"
+    local media_server svc
+    media_server="$(env_val MEDIA_SERVER)"
     echo -e "\n${CYAN}━━━━ Service URLs ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-    echo -e "  ${BOLD}Decypharr${NC}      http://localhost:8282"
-    echo -e "  ${BOLD}Prowlarr${NC}       http://localhost:9696"
-    echo -e "  ${BOLD}Byparr${NC}         http://localhost:8191"
-    echo -e "  ${BOLD}Radarr${NC}         http://localhost:7878"
-    echo -e "  ${BOLD}Sonarr${NC}         http://localhost:8989"
-    echo -e "  ${BOLD}Seerr${NC}          http://localhost:5055"
-    if [[ "${MEDIA_SERVER}" == "plex" ]]; then
-        echo -e "  ${BOLD}Plex${NC}           http://localhost:32400/web"
+    for svc in "${SVC_ORDER[@]}"; do
+        printf "  %b%-14s%b http://localhost:%s\n" "$BOLD" "${SVC_LABELS[$svc]}" "$NC" "${SVC_PORTS[$svc]}"
+    done
+    if [[ "${media_server}" == "plex" ]]; then
+        printf "  %b%-14s%b http://localhost:32400/web\n" "$BOLD" "Plex" "$NC"
     else
-        echo -e "  ${BOLD}Jellyfin${NC}       http://localhost:8096"
+        printf "  %b%-14s%b http://localhost:8096\n" "$BOLD" "Jellyfin" "$NC"
     fi
     echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
 }
@@ -920,14 +1171,8 @@ show_urls() {
 case "${1:-help}" in
     start)
         echo -e "${GREEN}Starting all services...${NC}"
-        # Re-apply mount propagation (does not persist across reboots)
-        source "${ENV_FILE}"
-        if [[ -n "${MOUNT_DIR:-}" ]]; then
-            echo -e "${YELLOW}Requesting sudo privileges to re-apply FUSE mounts...${NC}"
-            sudo mount --bind "${MOUNT_DIR}" "${MOUNT_DIR}" 2>/dev/null || true
-            sudo mount --make-shared "${MOUNT_DIR}" 2>/dev/null || true
-        fi
-        compose_cmd up -d
+        ensure_mount_propagation
+        compose_cmd up -d --remove-orphans
         show_urls
         ;;
     stop)
@@ -936,14 +1181,9 @@ case "${1:-help}" in
         ;;
     restart)
         echo -e "${YELLOW}Restarting all services...${NC}"
-        # Re-apply mount propagation (does not persist across reboots)
-        source "${ENV_FILE}"
-        if [[ -n "${MOUNT_DIR:-}" ]]; then
-            echo -e "${YELLOW}Requesting sudo privileges to re-apply FUSE mounts...${NC}"
-            sudo mount --bind "${MOUNT_DIR}" "${MOUNT_DIR}" 2>/dev/null || true
-            sudo mount --make-shared "${MOUNT_DIR}" 2>/dev/null || true
-        fi
-        compose_cmd restart
+        compose_cmd stop
+        ensure_mount_propagation
+        compose_cmd up -d --remove-orphans
         show_urls
         ;;
     status)
@@ -962,14 +1202,9 @@ case "${1:-help}" in
         ;;
     update)
         echo -e "${GREEN}Updating all services...${NC}"
-        source "${ENV_FILE}"
-        if [[ -n "${MOUNT_DIR:-}" ]]; then
-            echo -e "${YELLOW}Requesting sudo privileges to re-apply FUSE mounts...${NC}"
-            sudo mount --bind "${MOUNT_DIR}" "${MOUNT_DIR}" 2>/dev/null || true
-            sudo mount --make-shared "${MOUNT_DIR}" 2>/dev/null || true
-        fi
+        ensure_mount_propagation
         compose_cmd pull
-        compose_cmd up -d
+        compose_cmd up -d --remove-orphans
         show_urls
         ;;
     down)
@@ -980,12 +1215,11 @@ case "${1:-help}" in
         show_urls
         ;;
     keys)
-        source "${ENV_FILE}"
         echo -e "\n${CYAN}━━━━ API Keys ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-        echo -e "  ${BOLD}TorBox${NC}    ${TORBOX_API_KEY:-not set}"
-        echo -e "  ${BOLD}Radarr${NC}    ${RADARR_API_KEY:-not set}"
-        echo -e "  ${BOLD}Sonarr${NC}    ${SONARR_API_KEY:-not set}"
-        echo -e "  ${BOLD}Prowlarr${NC}  ${PROWLARR_API_KEY:-not set}"
+        echo -e "  ${BOLD}TorBox${NC}    $(env_val TORBOX_API_KEY)"
+        echo -e "  ${BOLD}Radarr${NC}    $(env_val RADARR_API_KEY)"
+        echo -e "  ${BOLD}Sonarr${NC}    $(env_val SONARR_API_KEY)"
+        echo -e "  ${BOLD}Prowlarr${NC}  $(env_val PROWLARR_API_KEY)"
         echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
         ;;
     enable)
@@ -999,6 +1233,35 @@ case "${1:-help}" in
         sudo systemctl disable torbox-media-server 2>/dev/null && \
             echo -e "${YELLOW}Auto-start disabled. Use './manage.sh start' to start services manually.${NC}" || \
             echo -e "${YELLOW}Systemd service not found.${NC}"
+        ;;
+    backup)
+        backup_dir="${SCRIPT_DIR}/backups/$(date +%Y%m%d_%H%M%S)"
+        mkdir -p "${backup_dir}"
+        cp -a "${ENV_FILE}" "${backup_dir}/" 2>/dev/null || true
+        cp -a "${COMPOSE_FILE}" "${backup_dir}/" 2>/dev/null || true
+        cp -ra "${SCRIPT_DIR}/configs" "${backup_dir}/" 2>/dev/null || true
+        echo -e "${GREEN}Backup saved to: ${backup_dir}${NC}"
+        ;;
+    health)
+        echo -e "\n${CYAN}━━━━ Service Health ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+        compose_cmd ps
+        echo ""
+        for svc in "${SVC_ORDER[@]}"; do
+            if curl -sf --connect-timeout 2 --max-time 5 -o /dev/null "http://localhost:${SVC_PORTS[$svc]}" 2>/dev/null; then
+                echo -e "  ${GREEN}✓${NC} ${SVC_LABELS[$svc]} (port ${SVC_PORTS[$svc]}) — reachable"
+            else
+                echo -e "  ${RED}✗${NC} ${SVC_LABELS[$svc]} (port ${SVC_PORTS[$svc]}) — not reachable"
+            fi
+        done
+        echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+        ;;
+    shell)
+        if [[ -z "${2:-}" ]]; then
+            echo -e "${YELLOW}Usage: ./manage.sh shell <service-name>${NC}"
+            echo "  Available: decypharr prowlarr byparr radarr sonarr seerr plex jellyfin"
+            exit 1
+        fi
+        compose_cmd exec "$2" /bin/bash 2>/dev/null || compose_cmd exec "$2" /bin/sh
         ;;
     help|*)
         show_help
@@ -1017,8 +1280,8 @@ MANAGE_EOF
 generate_systemd_service() {
     log_step "Setting up auto-start on boot..."
 
-    # Skip on non-systemd systems
-    if ! command -v systemctl &>/dev/null || ! systemctl --version &>/dev/null 2>&1; then
+    # Skip on non-systemd systems (check for running systemd, not just the binary)
+    if [[ ! -d /run/systemd/system ]] || ! command -v systemctl &>/dev/null; then
         log_warn "systemd not detected. Skipping auto-start service creation."
         log_warn "Use './manage.sh start' to start services manually after reboot."
         HAS_SYSTEMD=false
@@ -1051,11 +1314,11 @@ RemainAfterExit=yes
 
 # Step 1: Set up FUSE mount propagation (required for rclone WebDAV in Decypharr)
 # Prefixed with - to tolerate already-mounted state (idempotent)
-ExecStartPre=-/bin/mount --bind "${MOUNT_DIR}" "${MOUNT_DIR}"
-ExecStartPre=-/bin/mount --make-shared "${MOUNT_DIR}"
+ExecStartPre=-$(command -v mount) --bind "${MOUNT_DIR}" "${MOUNT_DIR}"
+ExecStartPre=-$(command -v mount) --make-shared "${MOUNT_DIR}"
 
 # Step 2: Start all containers
-ExecStart=${docker_bin} ${compose_args} --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d
+ExecStart=${docker_bin} ${compose_args} --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --remove-orphans
 
 # On stop: bring containers down gracefully
 ExecStop=${docker_bin} ${compose_args} --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" stop
@@ -1082,12 +1345,100 @@ SYSTEMD_EOF
 #   Prowlarr apps & proxy)
 # ============================================================================
 
+# Helper: Configure a Radarr/Sonarr service (download client, root folder, media mgmt, naming, quality)
+configure_arr_service() {
+    local name="$1" url="$2" api_key="$3" container="$4" port="$5" root_path="$6" naming_updates="$7"
+    local internal_url="http://${container}:${port}"
+    local cat_field="movieCategory" cat_imported_field="movieImportedCategory"
+    local unmonitor_field="autoUnmonitorPreviouslyDownloadedMovies"
+    if [[ "$name" == "Sonarr" ]]; then
+        cat_field="tvCategory"
+        cat_imported_field="tvImportedCategory"
+        unmonitor_field="autoUnmonitorPreviouslyDownloadedEpisodes"
+    fi
+
+    log_step "Configuring ${name}..."
+
+    # Add download client (Decypharr as qBittorrent mock)
+    local existing_dc
+    existing_dc=$(curl -sf --connect-timeout 5 --max-time 15 -H "X-Api-Key: ${api_key}" "${url}/api/v3/downloadclient" 2>/dev/null) || true
+    if ! echo "$existing_dc" | grep -q '"name":"Decypharr"' 2>/dev/null && ! echo "$existing_dc" | grep -q '"name": "Decypharr"' 2>/dev/null; then
+        local dc_json
+        dc_json=$(cat << DCJSON_EOF
+{
+    "name": "Decypharr",
+    "implementation": "QBittorrent",
+    "configContract": "QBittorrentSettings",
+    "protocol": "torrent",
+    "enable": true,
+    "priority": 1,
+    "removeCompletedDownloads": true,
+    "removeFailedDownloads": true,
+    "fields": [
+        {"name": "host", "value": "decypharr"},
+        {"name": "port", "value": 8282},
+        {"name": "useSsl", "value": false},
+        {"name": "username", "value": "${internal_url}"},
+        {"name": "password", "value": "${api_key}"},
+        {"name": "${cat_field}", "value": "${container}"},
+        {"name": "${cat_imported_field}", "value": ""},
+        {"name": "initialState", "value": 0},
+        {"name": "sequentialOrder", "value": false},
+        {"name": "firstAndLastFirst", "value": false}
+    ],
+    "tags": []
+}
+DCJSON_EOF
+)
+        curl -sf --connect-timeout 5 --max-time 15 -X POST -H "Content-Type: application/json" -H "X-Api-Key: ${api_key}" \
+            "${url}/api/v3/downloadclient?forceSave=true" \
+            -d "$dc_json" -o /dev/null && log_info "  Download client 'Decypharr' added to ${name}." \
+            || log_warn "  Failed to add download client to ${name}."
+    else
+        log_info "  ${name} already has Decypharr download client configured."
+    fi
+
+    # Add root folder
+    local existing_rf
+    existing_rf=$(curl -sf --connect-timeout 5 --max-time 15 -H "X-Api-Key: ${api_key}" "${url}/api/v3/rootfolder" 2>/dev/null) || true
+    if ! echo "$existing_rf" | grep -qF "\"${root_path}\"" 2>/dev/null; then
+        curl -sf --connect-timeout 5 --max-time 15 -X POST -H "Content-Type: application/json" -H "X-Api-Key: ${api_key}" \
+            "${url}/api/v3/rootfolder" \
+            -d '{"path": "'"${root_path}"'"}' -o /dev/null && log_info "  Root folder '${root_path}' added to ${name}." \
+            || log_warn "  Failed to add root folder to ${name}."
+    else
+        log_info "  ${name} already has root folder '${root_path}' configured."
+    fi
+
+    # Advanced configuration (requires python3 for JSON manipulation)
+    if [[ "${HAS_PYTHON3:-false}" == "true" ]]; then
+        update_arr_config "${name}" "$url" "$api_key" "config/mediamanagement" "
+c['copyUsingHardlinks'] = False
+c['importExtraFiles'] = True
+c['extraFileExtensions'] = 'srt,sub,idx,ass,ssa,nfo'
+c['${unmonitor_field}'] = False
+c['recycleBin'] = ''
+c['recycleBinCleanupDays'] = 0
+c['minimumFreeSpaceWhenImporting'] = 100
+" && log_info "  Media management configured (hardlinks disabled for debrid)." \
+          || log_warn "  Failed to configure media management."
+
+        update_arr_config "${name}" "$url" "$api_key" "config/naming" "${naming_updates}" \
+            && log_info "  Naming conventions configured." \
+            || log_warn "  Failed to configure naming."
+
+        configure_quality_profiles "${name}" "$url" "$api_key" \
+            && log_info "  Quality profiles updated (upgrades enabled)." \
+            || log_warn "  Failed to update quality profiles."
+    fi
+}
+
 # Helper: GET a *arr config section, modify fields with python3, PUT it back
 update_arr_config() {
     local name="$1" url="$2" api_key="$3" endpoint="$4" python_updates="$5"
     local config config_id updated
 
-    config=$(curl -sf -H "X-Api-Key: ${api_key}" "${url}/api/v3/${endpoint}" 2>/dev/null) || true
+    config=$(curl -sf --connect-timeout 5 --max-time 15 -H "X-Api-Key: ${api_key}" "${url}/api/v3/${endpoint}" 2>/dev/null) || true
     [[ -z "$config" ]] && { log_warn "  Could not retrieve ${name} ${endpoint}."; return 1; }
 
     config_id=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['id'])" "$config" 2>/dev/null) || true
@@ -1101,7 +1452,7 @@ print(json.dumps(c))
 " "$config" 2>/dev/null) || true
     [[ -z "$updated" ]] && { log_warn "  Could not update ${name} ${endpoint}."; return 1; }
 
-    curl -sf -X PUT -H "Content-Type: application/json" -H "X-Api-Key: ${api_key}" \
+    curl -sf --connect-timeout 5 --max-time 15 -X PUT -H "Content-Type: application/json" -H "X-Api-Key: ${api_key}" \
         "${url}/api/v3/${endpoint}/${config_id}" -d "$updated" -o /dev/null 2>/dev/null
 }
 
@@ -1110,7 +1461,7 @@ configure_quality_profiles() {
     local name="$1" url="$2" api_key="$3"
 
     local profiles
-    profiles=$(curl -sf -H "X-Api-Key: ${api_key}" "${url}/api/v3/qualityprofile" 2>/dev/null) || true
+    profiles=$(curl -sf --connect-timeout 5 --max-time 15 -H "X-Api-Key: ${api_key}" "${url}/api/v3/qualityprofile" 2>/dev/null) || true
     [[ -z "$profiles" || "$profiles" == "[]" ]] && return 0
 
     python3 -c "
@@ -1138,16 +1489,21 @@ sys.exit(0 if ok > 0 else 1)
 
 wait_for_service() {
     local name="$1" url="$2" api_key="$3" max_wait="${4:-90}" api_ver="${5:-v3}"
-    local elapsed=0
+    local elapsed=0 interval=2
+    local spin_chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
     log_step "Waiting for ${name} to be ready..."
     while [[ $elapsed -lt $max_wait ]]; do
-        if curl -sf -o /dev/null -H "X-Api-Key: ${api_key}" "${url}/api/${api_ver}/system/status" 2>/dev/null; then
+        if curl -sf --connect-timeout 3 --max-time 10 -o /dev/null -H "X-Api-Key: ${api_key}" "${url}/api/${api_ver}/system/status" 2>/dev/null; then
+            printf "\r  %-50s\n" ""
             log_info "${name} is ready. (${elapsed}s)"
             return 0
         fi
-        sleep 3
-        elapsed=$((elapsed + 3))
+        printf "\r  %s Waiting for %s... %ds/%ds" "${spin_chars:elapsed/interval%${#spin_chars}:1}" "$name" "$elapsed" "$max_wait"
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+        [[ $interval -lt 5 ]] && interval=$((interval + 1))
     done
+    printf "\r  %-50s\n" ""
     log_warn "${name} did not become ready within ${max_wait}s. Skipping auto-config."
     return 1
 }
@@ -1163,9 +1519,9 @@ configure_arrs() {
         log_warn "python3 not found. Advanced config (naming, media management, quality profiles) will be skipped."
     fi
 
-    local radarr_url="http://localhost:7878"
-    local sonarr_url="http://localhost:8989"
-    local prowlarr_url="http://localhost:9696"
+    local radarr_url="http://localhost:${SVC_PORTS[radarr]}"
+    local sonarr_url="http://localhost:${SVC_PORTS[sonarr]}"
+    local prowlarr_url="http://localhost:${SVC_PORTS[prowlarr]}"
 
     # Wait for all three services (Prowlarr uses API v1, Radarr/Sonarr use v3)
     local radarr_ready=false sonarr_ready=false prowlarr_ready=false
@@ -1173,151 +1529,21 @@ configure_arrs() {
     wait_for_service "Sonarr" "$sonarr_url" "$SONARR_API_KEY" 90 "v3" && sonarr_ready=true
     wait_for_service "Prowlarr" "$prowlarr_url" "$PROWLARR_API_KEY" 90 "v1" && prowlarr_ready=true
 
-    # --- Radarr: Add download client (Decypharr as qBittorrent) & root folder ---
+    # --- Radarr ---
     if [[ "$radarr_ready" == "true" ]]; then
-        log_step "Configuring Radarr..."
-
-        # Check if download client already exists
-        local existing_dc
-        existing_dc=$(curl -sf -H "X-Api-Key: ${RADARR_API_KEY}" "${radarr_url}/api/v3/downloadclient" 2>/dev/null) || true
-        if [[ "$existing_dc" == "[]" || -z "$existing_dc" ]]; then
-            curl -sf -X POST -H "Content-Type: application/json" -H "X-Api-Key: ${RADARR_API_KEY}" \
-                "${radarr_url}/api/v3/downloadclient?forceSave=true" \
-                -d '{
-                    "name": "Decypharr",
-                    "implementation": "QBittorrent",
-                    "configContract": "QBittorrentSettings",
-                    "protocol": "torrent",
-                    "enable": true,
-                    "priority": 1,
-                    "removeCompletedDownloads": true,
-                    "removeFailedDownloads": true,
-                    "fields": [
-                        {"name": "host", "value": "decypharr"},
-                        {"name": "port", "value": 8282},
-                        {"name": "useSsl", "value": false},
-                        {"name": "username", "value": "http://radarr:7878"},
-                        {"name": "password", "value": "'"${RADARR_API_KEY}"'"},
-                        {"name": "movieCategory", "value": "radarr"},
-                        {"name": "movieImportedCategory", "value": ""},
-                        {"name": "initialState", "value": 0},
-                        {"name": "sequentialOrder", "value": false},
-                        {"name": "firstAndLastFirst", "value": false}
-                    ],
-                    "tags": []
-                }' -o /dev/null && log_info "  Download client 'Decypharr' added to Radarr." \
-                || log_warn "  Failed to add download client to Radarr."
-        else
-            log_info "  Radarr already has download client(s) configured."
-        fi
-
-        # Add root folder
-        local existing_rf
-        existing_rf=$(curl -sf -H "X-Api-Key: ${RADARR_API_KEY}" "${radarr_url}/api/v3/rootfolder" 2>/dev/null) || true
-        if [[ "$existing_rf" == "[]" || -z "$existing_rf" ]]; then
-            curl -sf -X POST -H "Content-Type: application/json" -H "X-Api-Key: ${RADARR_API_KEY}" \
-                "${radarr_url}/api/v3/rootfolder" \
-                -d '{"path": "/data/media/movies"}' -o /dev/null && log_info "  Root folder '/data/media/movies' added to Radarr." \
-                || log_warn "  Failed to add root folder to Radarr."
-        else
-            log_info "  Radarr already has root folder(s) configured."
-        fi
-
-        # Advanced configuration (requires python3 for JSON manipulation)
-        if [[ "$HAS_PYTHON3" == "true" ]]; then
-            # Media management: disable hardlinks (critical for debrid/symlink setup)
-            update_arr_config "Radarr" "$radarr_url" "$RADARR_API_KEY" "config/mediamanagement" "
-c['copyUsingHardlinks'] = False
-c['importExtraFiles'] = True
-c['extraFileExtensions'] = 'srt,sub,idx,ass,ssa,nfo'
-c['autoUnmonitorPreviouslyDownloadedMovies'] = False
-c['recycleBin'] = ''
-c['recycleBinCleanupDays'] = 0
-c['minimumFreeSpaceWhenImporting'] = 100
-" && log_info "  Media management configured (hardlinks disabled for debrid)." \
-              || log_warn "  Failed to configure media management."
-
-            # Naming conventions: Plex/Jellyfin compatible formats
-            update_arr_config "Radarr" "$radarr_url" "$RADARR_API_KEY" "config/naming" "
+        local radarr_naming="
 c['renameMovies'] = True
 c['replaceIllegalCharacters'] = True
 c['colonReplacementFormat'] = 'dash'
 c['standardMovieFormat'] = '{Movie CleanTitle} ({Release Year}) [{Quality Full}]'
 c['movieFolderFormat'] = '{Movie CleanTitle} ({Release Year}) [imdbid-{ImdbId}]'
-" && log_info "  Naming conventions configured." \
-              || log_warn "  Failed to configure naming."
-
-            # Quality profiles: enable upgrades on all profiles
-            configure_quality_profiles "Radarr" "$radarr_url" "$RADARR_API_KEY" \
-                && log_info "  Quality profiles updated (upgrades enabled)." \
-                || log_warn "  Failed to update quality profiles."
-        fi
+"
+        configure_arr_service "Radarr" "$radarr_url" "$RADARR_API_KEY" "radarr" 7878 "/data/media/movies" "$radarr_naming"
     fi
 
-    # --- Sonarr: Add download client (Decypharr as qBittorrent) & root folder ---
+    # --- Sonarr ---
     if [[ "$sonarr_ready" == "true" ]]; then
-        log_step "Configuring Sonarr..."
-
-        local existing_dc
-        existing_dc=$(curl -sf -H "X-Api-Key: ${SONARR_API_KEY}" "${sonarr_url}/api/v3/downloadclient" 2>/dev/null) || true
-        if [[ "$existing_dc" == "[]" || -z "$existing_dc" ]]; then
-            curl -sf -X POST -H "Content-Type: application/json" -H "X-Api-Key: ${SONARR_API_KEY}" \
-                "${sonarr_url}/api/v3/downloadclient?forceSave=true" \
-                -d '{
-                    "name": "Decypharr",
-                    "implementation": "QBittorrent",
-                    "configContract": "QBittorrentSettings",
-                    "protocol": "torrent",
-                    "enable": true,
-                    "priority": 1,
-                    "removeCompletedDownloads": true,
-                    "removeFailedDownloads": true,
-                    "fields": [
-                        {"name": "host", "value": "decypharr"},
-                        {"name": "port", "value": 8282},
-                        {"name": "useSsl", "value": false},
-                        {"name": "username", "value": "http://sonarr:8989"},
-                        {"name": "password", "value": "'"${SONARR_API_KEY}"'"},
-                        {"name": "tvCategory", "value": "sonarr"},
-                        {"name": "tvImportedCategory", "value": ""},
-                        {"name": "initialState", "value": 0},
-                        {"name": "sequentialOrder", "value": false},
-                        {"name": "firstAndLastFirst", "value": false}
-                    ],
-                    "tags": []
-                }' -o /dev/null && log_info "  Download client 'Decypharr' added to Sonarr." \
-                || log_warn "  Failed to add download client to Sonarr."
-        else
-            log_info "  Sonarr already has download client(s) configured."
-        fi
-
-        local existing_rf
-        existing_rf=$(curl -sf -H "X-Api-Key: ${SONARR_API_KEY}" "${sonarr_url}/api/v3/rootfolder" 2>/dev/null) || true
-        if [[ "$existing_rf" == "[]" || -z "$existing_rf" ]]; then
-            curl -sf -X POST -H "Content-Type: application/json" -H "X-Api-Key: ${SONARR_API_KEY}" \
-                "${sonarr_url}/api/v3/rootfolder" \
-                -d '{"path": "/data/media/tv"}' -o /dev/null && log_info "  Root folder '/data/media/tv' added to Sonarr." \
-                || log_warn "  Failed to add root folder to Sonarr."
-        else
-            log_info "  Sonarr already has root folder(s) configured."
-        fi
-
-        # Advanced configuration (requires python3 for JSON manipulation)
-        if [[ "$HAS_PYTHON3" == "true" ]]; then
-            # Media management: disable hardlinks (critical for debrid/symlink setup)
-            update_arr_config "Sonarr" "$sonarr_url" "$SONARR_API_KEY" "config/mediamanagement" "
-c['copyUsingHardlinks'] = False
-c['importExtraFiles'] = True
-c['extraFileExtensions'] = 'srt,sub,idx,ass,ssa,nfo'
-c['autoUnmonitorPreviouslyDownloadedEpisodes'] = False
-c['recycleBin'] = ''
-c['recycleBinCleanupDays'] = 0
-c['minimumFreeSpaceWhenImporting'] = 100
-" && log_info "  Media management configured (hardlinks disabled for debrid)." \
-              || log_warn "  Failed to configure media management."
-
-            # Naming conventions: Plex/Jellyfin compatible formats
-            update_arr_config "Sonarr" "$sonarr_url" "$SONARR_API_KEY" "config/naming" "
+        local sonarr_naming="
 c['renameEpisodes'] = True
 c['replaceIllegalCharacters'] = True
 c['colonReplacementFormat'] = 4
@@ -1326,14 +1552,8 @@ c['dailyEpisodeFormat'] = '{Series TitleYear} - {Air-Date} - {Episode CleanTitle
 c['animeEpisodeFormat'] = '{Series TitleYear} - S{season:00}E{episode:00} - {Episode CleanTitle} [{Quality Full}]'
 c['seasonFolderFormat'] = 'Season {season:00}'
 c['seriesFolderFormat'] = '{Series TitleYear}'
-" && log_info "  Naming conventions configured." \
-              || log_warn "  Failed to configure naming."
-
-            # Quality profiles: enable upgrades on all profiles
-            configure_quality_profiles "Sonarr" "$sonarr_url" "$SONARR_API_KEY" \
-                && log_info "  Quality profiles updated (upgrades enabled)." \
-                || log_warn "  Failed to update quality profiles."
-        fi
+"
+        configure_arr_service "Sonarr" "$sonarr_url" "$SONARR_API_KEY" "sonarr" 8989 "/data/media/tv" "$sonarr_naming"
     fi
 
     # --- Prowlarr: Add Radarr & Sonarr as apps, add Byparr as FlareSolverr proxy ---
@@ -1342,9 +1562,9 @@ c['seriesFolderFormat'] = '{Series TitleYear}'
 
         # Add Byparr as FlareSolverr-compatible indexer proxy
         local existing_proxies
-        existing_proxies=$(curl -sf -H "X-Api-Key: ${PROWLARR_API_KEY}" "${prowlarr_url}/api/v1/indexerProxy" 2>/dev/null) || true
-        if [[ "$existing_proxies" == "[]" || -z "$existing_proxies" ]]; then
-            curl -sf -X POST -H "Content-Type: application/json" -H "X-Api-Key: ${PROWLARR_API_KEY}" \
+        existing_proxies=$(curl -sf --connect-timeout 5 --max-time 15 -H "X-Api-Key: ${PROWLARR_API_KEY}" "${prowlarr_url}/api/v1/indexerProxy" 2>/dev/null) || true
+        if ! echo "$existing_proxies" | grep -q '"name":"Byparr"' 2>/dev/null && ! echo "$existing_proxies" | grep -q '"name": "Byparr"' 2>/dev/null; then
+            curl -sf --connect-timeout 5 --max-time 15 -X POST -H "Content-Type: application/json" -H "X-Api-Key: ${PROWLARR_API_KEY}" \
                 "${prowlarr_url}/api/v1/indexerProxy?forceSave=true" \
                 -d '{
                     "name": "Byparr",
@@ -1358,14 +1578,15 @@ c['seriesFolderFormat'] = '{Series TitleYear}'
                 }' -o /dev/null && log_info "  Byparr proxy added to Prowlarr." \
                 || log_warn "  Failed to add Byparr proxy to Prowlarr."
         else
-            log_info "  Prowlarr already has indexer proxy(ies) configured."
+            log_info "  Prowlarr already has Byparr proxy configured."
         fi
 
-        # Add Radarr as an application
         local existing_apps
-        existing_apps=$(curl -sf -H "X-Api-Key: ${PROWLARR_API_KEY}" "${prowlarr_url}/api/v1/applications" 2>/dev/null) || true
-        if [[ "$existing_apps" == "[]" || -z "$existing_apps" ]]; then
-            curl -sf -X POST -H "Content-Type: application/json" -H "X-Api-Key: ${PROWLARR_API_KEY}" \
+        existing_apps=$(curl -sf --connect-timeout 5 --max-time 15 -H "X-Api-Key: ${PROWLARR_API_KEY}" "${prowlarr_url}/api/v1/applications" 2>/dev/null) || true
+
+        # Add Radarr as an application (check independently)
+        if ! echo "$existing_apps" | grep -q '"name":"Radarr"' 2>/dev/null && ! echo "$existing_apps" | grep -q '"name": "Radarr"' 2>/dev/null; then
+            curl -sf --connect-timeout 5 --max-time 15 -X POST -H "Content-Type: application/json" -H "X-Api-Key: ${PROWLARR_API_KEY}" \
                 "${prowlarr_url}/api/v1/applications?forceSave=true" \
                 -d '{
                     "name": "Radarr",
@@ -1381,9 +1602,13 @@ c['seriesFolderFormat'] = '{Series TitleYear}'
                     "tags": []
                 }' -o /dev/null && log_info "  Radarr app added to Prowlarr." \
                 || log_warn "  Failed to add Radarr app to Prowlarr."
+        else
+            log_info "  Prowlarr already has Radarr app configured."
+        fi
 
-            # Add Sonarr as an application
-            curl -sf -X POST -H "Content-Type: application/json" -H "X-Api-Key: ${PROWLARR_API_KEY}" \
+        # Add Sonarr as an application (check independently)
+        if ! echo "$existing_apps" | grep -q '"name":"Sonarr"' 2>/dev/null && ! echo "$existing_apps" | grep -q '"name": "Sonarr"' 2>/dev/null; then
+            curl -sf --connect-timeout 5 --max-time 15 -X POST -H "Content-Type: application/json" -H "X-Api-Key: ${PROWLARR_API_KEY}" \
                 "${prowlarr_url}/api/v1/applications?forceSave=true" \
                 -d '{
                     "name": "Sonarr",
@@ -1400,7 +1625,7 @@ c['seriesFolderFormat'] = '{Series TitleYear}'
                 }' -o /dev/null && log_info "  Sonarr app added to Prowlarr." \
                 || log_warn "  Failed to add Sonarr app to Prowlarr."
         else
-            log_info "  Prowlarr already has application(s) configured."
+            log_info "  Prowlarr already has Sonarr app configured."
         fi
     fi
 
@@ -1420,25 +1645,15 @@ print_post_install() {
 
     echo -e "${BOLD}━━━━ Service URLs ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo -e "  ${BOLD}Decypharr${NC}      http://localhost:8282"
-    echo -e "  ${BOLD}Prowlarr${NC}       http://localhost:9696"
-    echo -e "  ${BOLD}Byparr${NC}         http://localhost:8191"
-    echo -e "  ${BOLD}Radarr${NC}         http://localhost:7878"
-    echo -e "  ${BOLD}Sonarr${NC}         http://localhost:8989"
-    echo -e "  ${BOLD}Seerr${NC}          http://localhost:5055"
-
-    if [[ "$MEDIA_SERVER" == "plex" ]]; then
-        echo -e "  ${BOLD}Plex${NC}           http://localhost:32400/web"
-    else
-        echo -e "  ${BOLD}Jellyfin${NC}       http://localhost:8096"
-    fi
+    print_service_urls
 
     echo ""
     echo -e "${BOLD}━━━━ Pre-Seeded API Keys ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo -e "  ${BOLD}Radarr${NC}    ${RADARR_API_KEY}"
-    echo -e "  ${BOLD}Sonarr${NC}    ${SONARR_API_KEY}"
-    echo -e "  ${BOLD}Prowlarr${NC}  ${PROWLARR_API_KEY}"
+    echo -e "  ${BOLD}Radarr${NC}    $(mask_key "${RADARR_API_KEY}")"
+    echo -e "  ${BOLD}Sonarr${NC}    $(mask_key "${SONARR_API_KEY}")"
+    echo -e "  ${BOLD}Prowlarr${NC}  $(mask_key "${PROWLARR_API_KEY}")"
+    echo -e "  ${YELLOW}View full keys with:${NC} cd ${INSTALL_DIR} && ./manage.sh keys"
     echo ""
 
     if [[ "$SERVICES_STARTED" == "true" ]]; then
@@ -1495,8 +1710,8 @@ print_post_install() {
         echo "     - Tag: flaresolverr"
         echo "     - Host: http://byparr:8191"
         echo "   • Add Radarr & Sonarr as apps: Settings → Apps → Add"
-        echo "     - Radarr: http://radarr:7878  (API key: ${RADARR_API_KEY})"
-        echo "     - Sonarr: http://sonarr:8989  (API key: ${SONARR_API_KEY})"
+        echo "     - Radarr: http://radarr:7878  (API key: $(mask_key "${RADARR_API_KEY}"))"
+        echo "     - Sonarr: http://sonarr:8989  (API key: $(mask_key "${SONARR_API_KEY}"))"
     fi
     echo "   • Add indexers (torrent sites) you want to use"
     echo ""
@@ -1514,7 +1729,7 @@ print_post_install() {
         echo "     - Host: decypharr"
         echo "     - Port: 8282"
         echo "     - Username: http://radarr:7878"
-        echo "     - Password: ${RADARR_API_KEY}"
+        echo "     - Password: (see ./manage.sh keys)"
         echo "     - Category: radarr"
         echo "   • Settings → Media Management → Root Folder: /data/media/movies"
     fi
@@ -1533,7 +1748,7 @@ print_post_install() {
         echo "     - Host: decypharr"
         echo "     - Port: 8282"
         echo "     - Username: http://sonarr:8989"
-        echo "     - Password: ${SONARR_API_KEY}"
+        echo "     - Password: (see ./manage.sh keys)"
         echo "     - Category: sonarr"
         echo "   • Settings → Media Management → Root Folder: /data/media/tv"
     fi
@@ -1568,8 +1783,8 @@ print_post_install() {
         echo "   • Sign in and connect to Jellyfin (http://jellyfin:8096)"
     fi
     echo "   • Add Radarr & Sonarr servers"
-    echo "     - Radarr: http://radarr:7878 + API key: ${RADARR_API_KEY}"
-    echo "     - Sonarr: http://sonarr:8989 + API key: ${SONARR_API_KEY}"
+    echo "     - Radarr: http://radarr:7878 + API key: $(mask_key "${RADARR_API_KEY}")"
+    echo "     - Sonarr: http://sonarr:8989 + API key: $(mask_key "${SONARR_API_KEY}")"
     echo ""
 
     echo -e "${BOLD}━━━━ Important Notes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -1643,6 +1858,16 @@ check_existing_installation() {
             exit 0
         fi
 
+        # Back up existing generated files before overwriting
+        local backup_ts
+        backup_ts="$(date +%Y%m%d_%H%M%S)"
+        for bf in "${ENV_FILE}" "${COMPOSE_FILE}" "${CONFIG_DIR}/decypharr/config.json"; do
+            if [[ -f "$bf" ]]; then
+                cp "$bf" "${bf}.bak.${backup_ts}"
+            fi
+        done
+        log_info "Backed up existing config files (.bak.${backup_ts})."
+
         # Safely extract existing API keys using grep+cut (not source)
         EXISTING_RADARR_API_KEY=$(grep '^RADARR_API_KEY=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
         EXISTING_SONARR_API_KEY=$(grep '^SONARR_API_KEY=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
@@ -1664,25 +1889,12 @@ start_services() {
         log_step "Starting Docker containers (first run downloads ~5-8 GB of images, this may take several minutes)..."
         cd "${INSTALL_DIR}"
 
-        # If the current shell doesn't have docker group yet (e.g. just added),
-        # fall back to sudo so the first run doesn't fail.
-        local CMD_PREFIX=""
-        if ! docker info &>/dev/null 2>&1; then
-            log_warn "Docker socket not accessible in current shell — using sudo."
-            CMD_PREFIX="sudo "
-        fi
+        detect_compose_cmd
 
-        if docker compose version &>/dev/null 2>&1; then
-            if ! ${CMD_PREFIX}docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d; then
-                log_error "Failed to start services. Check your internet connection and disk space."
-                log_error "Try running: cd ${INSTALL_DIR} && docker compose --env-file .env -f docker-compose.yml up -d"
-                return 1
-            fi
-        else
-            if ! ${CMD_PREFIX}docker-compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d; then
-                log_error "Failed to start services. Check your internet connection and disk space."
-                return 1
-            fi
+        if ! "${COMPOSE_CMD[@]}" --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --remove-orphans; then
+            log_error "Failed to start services. Check your internet connection and disk space."
+            log_error "Try running: cd ${INSTALL_DIR} && docker compose --env-file .env -f docker-compose.yml up -d"
+            return 1
         fi
         echo ""
         log_info "All services starting! Give them 30-60 seconds to initialize."
@@ -1700,10 +1912,23 @@ start_services() {
 # ============================================================================
 
 main() {
+    # Warn if running as root (PUID/PGID would default to 0:0, usually undesirable)
+    if [[ $EUID -eq 0 ]]; then
+        log_warn "Running as root. Container PUID/PGID will default to 0:0."
+        log_warn "Consider running as a regular user instead."
+        echo ""
+        read -rp "Continue as root? [y/N]: " run_as_root
+        if [[ "${run_as_root,,}" != "y" ]]; then
+            log_info "Re-run as a regular user: ./setup.sh"
+            exit 0
+        fi
+    fi
+
     print_banner
     check_existing_installation
     check_dependencies
     gather_config
+    check_port_conflicts
     create_directories
     generate_decypharr_config
     generate_arr_configs
@@ -1711,6 +1936,13 @@ main() {
     generate_docker_compose
     generate_management_script
     generate_systemd_service
+
+    # Fix ownership for custom PUID/PGID (after all config files are generated)
+    if [[ "${PUID}" != "$(id -u)" || "${PGID}" != "$(id -g)" ]]; then
+        log_step "Applying custom PUID/PGID ownership to config and data directories..."
+        sudo chown -R "${PUID}:${PGID}" "${CONFIG_DIR}" "${DATA_DIR}"
+    fi
+
     start_services
     if [[ "$SERVICES_STARTED" == "true" ]]; then
         configure_arrs
