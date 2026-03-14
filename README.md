@@ -90,7 +90,7 @@ User Request                Search & Automation           Cloud Download
 | **Plex** | 32400 | Media server option 1. Streams your library to any device. Requires a free Plex account. |
 | **Jellyfin** | 8096 | Media server option 2 (open-source, no account needed). Streams your library to any device. |
 
-> **Note:** All ports are bound to `127.0.0.1` (localhost only) by default for security, except Plex and Jellyfin, which are accessible on your LAN. See [Accessing From Other Devices](#accessing-from-other-devices) to open access to your network for other services.
+> **Note:** All service ports except Plex are bound to `127.0.0.1` (localhost only) by default for security. Plex binds to all interfaces (`0.0.0.0:32400`) so other devices on your LAN can stream. See [Accessing From Other Devices](#accessing-from-other-devices) to open access for other services.
 
 ## Before You Begin
 
@@ -176,7 +176,7 @@ The setup script pre-seeds and auto-configures as much as possible so you don't 
 |---------|-------|-----|
 | API keys | Random 32-char hex keys for Radarr, Sonarr, Prowlarr | Enables API auto-configuration on first launch |
 | Authentication | `DisabledForLocalAddresses` | Allows API calls to work without credentials on first launch |
-| Decypharr config | TorBox API key, WebDAV mount, symlink paths | Connects to your TorBox account |
+| Decypharr config | TorBox API key, WebDAV mount, rclone mount, symlink paths | Connects to your TorBox account and enables rclone FUSE mounting |
 | Systemd service | `torbox-media-server.service` | Auto-starts mount propagation + containers on boot |
 
 ### Auto-Configured via API (after containers start)
@@ -207,6 +207,8 @@ The setup script pre-seeds and auto-configures as much as possible so you don't 
 | **Prowlarr** | Byparr proxy | `http://byparr:8191` (Cloudflare bypass) |
 | **Prowlarr** | Radarr app | Connected with API key, full sync, movie categories |
 | **Prowlarr** | Sonarr app | Connected with API key, full sync, TV categories |
+| **Radarr** | Plex notification | Triggers instant Plex library scan on import/upgrade/delete (Plex only) |
+| **Sonarr** | Plex notification | Triggers instant Plex library scan on import/upgrade/delete (Plex only) |
 
 ### File Naming Examples
 
@@ -257,14 +259,11 @@ Decypharr is the critical bridge between your media managers and TorBox. **Nothi
 
 1. Open **http://localhost:8282** in your browser
 2. On first launch, you'll see a setup page — create your Decypharr credentials (username & password)
-3. After logging in, go to the **Debrid** tab:
-   - Verify your **TorBox API key** is shown (the script pre-configured this)
-   - Ensure **Rclone Folder** is set to `/mnt/remote/torbox/__all__`
-   - Make sure **WebDAV** is enabled (toggle it on if it isn't)
-4. Go to the **Rclone** tab:
-   - Verify the mount is **enabled**
-   - Mount path should be `/mnt/remote`
-5. Click **Save** if you made any changes
+3. After logging in, verify the pre-configured settings:
+   - **Debrid** tab: TorBox API key should be shown ✓, Rclone Folder set to `/mnt/remote/torbox/__all__` ✓, WebDAV enabled ✓
+   - **Rclone** tab: Mount should be **enabled** ✓, mount path `/mnt/remote` ✓
+   - All of the above are pre-configured by the setup script — just verify they look correct
+4. Click **Save** if you made any changes
 
 **✅ What success looks like:** The Debrid tab shows your API key, WebDAV is enabled, and the Rclone tab shows the mount as active.
 
@@ -393,7 +392,7 @@ Seerr provides a beautiful frontend where you (and optionally your family/friend
 1. Open **http://localhost:5055**
 2. Sign in:
    - **Plex users:** Click "Sign In with Plex" and authorize with your Plex account, then select your Plex server from the list.
-     > ⚠️ **Plex uses host networking**, so Seerr cannot reach it via the container name `plex`. When prompted for the Plex server URL, use your machine's **LAN IP address** (e.g., `http://192.168.1.100:32400`). Find your LAN IP with: `hostname -I | awk '{print $1}'`
+     > When prompted for the Plex server URL, use `http://plex:32400` — Plex and Seerr are on the same Docker network, so the container name works directly.
    - **Jellyfin users:** Click "Use Jellyfin" → enter your Jellyfin server URL as `http://jellyfin:8096` → sign in with your Jellyfin admin credentials
 3. Add **Radarr** (movies):
    - Click **Add Radarr Server**
@@ -518,7 +517,7 @@ Then restart: `./manage.sh restart`
 
 For most users, your media server (Plex or Jellyfin) is already accessible on your network. You only need to do this if you want to expose **Seerr** so family and friends can request content.
 
-> **Plex note:** Plex already uses `network_mode: host`, so it's accessible on your network by default at `http://YOUR-IP:32400/web`.
+> **Plex note:** Plex exposes port 32400 on all interfaces by default, so it's accessible on your network at `http://YOUR-IP:32400/web`. To restrict it to localhost only, change `"32400:32400"` to `"127.0.0.1:32400:32400"` in `docker-compose.yml`.
 
 ### Option 2: Reverse Proxy (Advanced)
 
@@ -590,6 +589,14 @@ TorBox works best with popular content that's already cached. If you request som
 
 For popular movies and TV shows, content is usually available within seconds.
 
+### TorBox rate limit errors (429)
+
+TorBox's API has a limit of 60 requests per hour. If you request a full TV season at once, Sonarr may try to grab many episodes rapidly and exhaust this limit. The setup script configures Decypharr with `rate_limit: "55/hour"` to stay within bounds, but if you see `HTTP error 429: {"detail":"60 per 1 hour"}`:
+
+- Wait an hour for the limit to reset — queued grabs will retry automatically
+- Avoid requesting multiple full seasons simultaneously
+- Check your Decypharr config (`configs/decypharr/config.json`) and ensure `rate_limit` is set to `"55/hour"` or lower
+
 ### Byparr not solving Cloudflare challenges
 
 Some sites have advanced protections that no automated solver can bypass. Try:
@@ -606,13 +613,11 @@ Make sure you're using **container names** (`radarr`, `sonarr`) as the hostname 
 
 ### "Seerr can't find/connect to Plex"
 
-Plex uses `network_mode: host`, so Seerr (which runs on Docker's internal network) cannot reach it via the container name `plex` or `localhost`. Instead, use your machine's **LAN IP address**:
-```bash
-# Find your LAN IP:
-hostname -I | awk '{print $1}'
-# Then use: http://YOUR-LAN-IP:32400
+Plex and Seerr are on the same Docker bridge network (`media-network`), so use the container name:
 ```
-This is not an issue with Jellyfin, which runs on the shared Docker network.
+http://plex:32400
+```
+If this doesn't work, check that both containers are running (`./manage.sh status`) and on the same network (`docker network inspect torbox-media-server_media-network`).
 
 ### How do I find my API keys?
 
@@ -640,6 +645,8 @@ This usually means Radarr or Sonarr hasn't finished starting yet. Wait a minute 
 - **Seerr** instead of Overseerr — Overseerr was archived in 2024; Seerr is the merged successor supporting Plex, Jellyfin, and Emby
 - **Byparr** instead of FlareSolverr — FlareSolverr is currently non-functional (Cloudflare detects it); Byparr is a drop-in replacement using the same API
 - **Only Decypharr gets FUSE/SYS_ADMIN** — Plex/Jellyfin/Radarr/Sonarr only read files, they don't need elevated privileges
+- **Plex on bridge networking** — Plex runs on the same Docker bridge network as all other services, allowing Seerr to connect via container name (`http://plex:32400`). Port 32400 is exposed on all interfaces for LAN streaming. Host networking was avoided because many Linux firewalls (UFW, firewalld) block traffic from Docker bridge containers to the host, causing Seerr ↔ Plex connectivity failures
+- **Plex notifications on Radarr/Sonarr** — triggers an instant Plex library scan when content is imported, upgraded, or deleted, so new media appears in seconds instead of waiting for Plex's periodic scan interval
 - **Ports bound to localhost** — prevents accidental LAN/WAN exposure of admin UIs
 - **Mount propagation** — uses `rshared` on Decypharr (the mount source) and `rslave` on media servers (consumers); a systemd service (`torbox-media-server`) handles this automatically on boot, and `manage.sh` re-applies it as a safety net
 - **Hardlinks disabled** — debrid setups use symlinks from Decypharr's WebDAV mount, not local files; hardlinks would fail
@@ -662,29 +669,23 @@ This pulls the latest Docker images and restarts all containers. Your configurat
 
 ## Uninstalling
 
-To completely remove the media server:
+Run the uninstall script from the project root:
 
 ```bash
-# Stop and remove the systemd auto-start service
-sudo systemctl stop torbox-media-server
-sudo systemctl disable torbox-media-server
-sudo rm /etc/systemd/system/torbox-media-server.service
-sudo systemctl daemon-reload
-
-# Stop and remove containers
-cd torbox-media-server/
-./manage.sh down
-cd ..
-
-# Remove all config, data, and generated files
-rm -rf torbox-media-server/
-
-# Remove mount point
-sudo umount /mnt/torbox-media 2>/dev/null
-sudo rm -rf /mnt/torbox-media
+chmod +x uninstall.sh
+./uninstall.sh
 ```
 
-> **Note:** This does not uninstall Docker itself or remove Docker images. To also free up disk space from Docker images, run `docker system prune -a`.
+The script will:
+1. Stop and remove all Docker containers and the network
+2. Remove the systemd auto-start service
+3. Remove the installation directory (configs, data, docker-compose, .env)
+4. Unmount and remove the mount point
+5. Optionally remove Docker images to free ~5–8 GB of disk space
+
+You'll be asked to confirm before anything is removed. Your TorBox account and cloud-stored media are not affected.
+
+> **Note:** This does not uninstall Docker itself. To reclaim all Docker disk space (including unrelated images), run `docker system prune -a`.
 
 ## Glossary
 

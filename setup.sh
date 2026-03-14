@@ -532,7 +532,7 @@ create_directories() {
 
     mkdir -p "${INSTALL_DIR}"
     mkdir -p "${CONFIG_DIR}"/{prowlarr,radarr,sonarr,seerr,decypharr}
-    mkdir -p "${DATA_DIR}"/{media/{movies,tv},downloads}
+    mkdir -p "${DATA_DIR}"/{media/{movies,tv},downloads/{radarr,sonarr}}
 
     if [[ "$MEDIA_SERVER" == "plex" ]]; then
         mkdir -p "${CONFIG_DIR}/plex"
@@ -579,9 +579,14 @@ generate_decypharr_config() {
       "name": "torbox",
       "api_key": "${TORBOX_API_KEY}",
       "folder": "/mnt/remote/torbox/__all__",
+      "rate_limit": "55/hour",
       "use_webdav": true
     }
   ],
+  "rclone": {
+    "enabled": true,
+    "mount_path": "/mnt/remote"
+  },
   "qbittorrent": {
     "download_folder": "/data/downloads/",
     "categories": ["sonarr", "radarr"]
@@ -955,7 +960,10 @@ COMPOSE_EOF
     image: lscr.io/linuxserver/plex:latest
     container_name: plex
     restart: unless-stopped
-    network_mode: host
+    networks:
+      - media-network
+    ports:
+      - "32400:32400"
     environment:
       - PUID=\${PUID}
       - PGID=\${PGID}
@@ -1434,6 +1442,52 @@ c['minimumFreeSpaceWhenImporting'] = 100
             && log_info "  Quality profiles updated (upgrades enabled)." \
             || log_warn "  Failed to update quality profiles."
     fi
+
+    # Add Plex notification so library updates happen immediately on import
+    if [[ "${MEDIA_SERVER}" == "plex" ]]; then
+        local existing_notifs
+        existing_notifs=$(curl -sf --connect-timeout 5 --max-time 15 -H "X-Api-Key: ${api_key}" "${url}/api/v3/notification" 2>/dev/null) || true
+        if ! echo "$existing_notifs" | grep -q '"implementation":"PlexServer"' 2>/dev/null && ! echo "$existing_notifs" | grep -q '"implementation": "PlexServer"' 2>/dev/null; then
+            local plex_token=""
+            local plex_prefs="${CONFIG_DIR}/plex/Library/Application Support/Plex Media Server/Preferences.xml"
+            if [[ -f "$plex_prefs" ]]; then
+                plex_token=$(grep -oP 'PlexOnlineToken="\K[^"]+' "$plex_prefs" 2>/dev/null) || true
+            fi
+            if [[ -n "$plex_token" ]]; then
+                local on_download_field="onDownload" on_upgrade_field="onUpgrade"
+                local on_delete_field="onMovieFileDelete" on_delete_upgrade_field="onMovieFileDeleteForUpgrade"
+                local on_rename_field="onRename"
+                if [[ "$name" == "Sonarr" ]]; then
+                    on_delete_field="onEpisodeFileDelete"
+                    on_delete_upgrade_field="onEpisodeFileDeleteForUpgrade"
+                fi
+                curl -sf --connect-timeout 5 --max-time 15 -X POST -H "Content-Type: application/json" -H "X-Api-Key: ${api_key}" \
+                    "${url}/api/v3/notification" \
+                    -d '{
+                        "name": "Plex",
+                        "implementation": "PlexServer",
+                        "configContract": "PlexServerSettings",
+                        "'"$on_download_field"'": true,
+                        "'"$on_upgrade_field"'": true,
+                        "'"$on_rename_field"'": true,
+                        "'"$on_delete_field"'": true,
+                        "'"$on_delete_upgrade_field"'": true,
+                        "fields": [
+                            {"name": "host", "value": "plex"},
+                            {"name": "port", "value": 32400},
+                            {"name": "useSsl", "value": false},
+                            {"name": "authToken", "value": "'"$plex_token"'"},
+                            {"name": "updateLibrary", "value": true}
+                        ]
+                    }' -o /dev/null && log_info "  Plex notification added to ${name} (instant library updates)." \
+                    || log_warn "  Failed to add Plex notification to ${name}."
+            else
+                log_warn "  Plex token not found — skipping Plex notification for ${name}. You can add it manually in ${name} → Settings → Connect."
+            fi
+        else
+            log_info "  ${name} already has Plex notification configured."
+        fi
+    fi
 }
 
 # Helper: GET a *arr config section, modify fields with python3, PUT it back
@@ -1662,6 +1716,7 @@ print_post_install() {
     if [[ "$SERVICES_STARTED" == "true" ]]; then
         echo -e "${BOLD}━━━━ Auto-Configured (already done for you) ━━━━━━━━━━━━━━━${NC}"
         echo ""
+        echo -e "  ${GREEN}✓${NC} Decypharr config (TorBox API key, WebDAV, rclone mount)"
         echo -e "  ${GREEN}✓${NC} Radarr/Sonarr/Prowlarr API keys pre-seeded in config.xml"
         echo -e "  ${GREEN}✓${NC} Radarr download client (Decypharr as qBittorrent)"
         echo -e "  ${GREEN}✓${NC} Radarr root folder (/data/media/movies)"
@@ -1676,6 +1731,10 @@ print_post_install() {
         echo -e "  ${GREEN}✓${NC} Prowlarr Byparr proxy (FlareSolverr-compatible)"
         echo -e "  ${GREEN}✓${NC} Prowlarr → Radarr app connection"
         echo -e "  ${GREEN}✓${NC} Prowlarr → Sonarr app connection"
+        if [[ "$MEDIA_SERVER" == "plex" ]]; then
+        echo -e "  ${GREEN}✓${NC} Radarr → Plex notification (instant library updates)"
+        echo -e "  ${GREEN}✓${NC} Sonarr → Plex notification (instant library updates)"
+        fi
         echo ""
     fi
 
@@ -1696,11 +1755,12 @@ print_post_install() {
     echo ""
     echo -e "${CYAN}1. Decypharr (do first)${NC}"
     echo "   • Open http://localhost:8282"
-    echo "   • Set up credentials on first launch"
-    echo "   • Go to Debrid tab → verify TorBox API key is configured"
-    echo "   • Ensure Mount/Rclone Folder is: /mnt/remote/torbox/__all__"
-    echo "   • Enable WebDAV"
-    echo "   • Go to Rclone tab → verify mount is enabled, path is /mnt/remote"
+    echo -e "   • ${YELLOW}Set up credentials on first launch${NC}"
+    echo -e "   • ${GREEN}TorBox API key pre-configured ✓${NC}"
+    echo -e "   • ${GREEN}Rclone Folder set to /mnt/remote/torbox/__all__ ✓${NC}"
+    echo -e "   • ${GREEN}WebDAV enabled ✓${NC}"
+    echo -e "   • ${GREEN}Rclone mount enabled, path /mnt/remote ✓${NC}"
+    echo "   • After creating credentials, verify the above in Debrid & Rclone tabs"
     echo ""
     echo -e "${CYAN}2. Prowlarr${NC}"
     echo "   • Open http://localhost:9696"
@@ -1779,9 +1839,8 @@ print_post_install() {
     echo "   • Supports both Plex and Jellyfin"
     if [[ "$MEDIA_SERVER" == "plex" ]]; then
         echo "   • Sign in with your Plex account"
-        echo -e "   • ${YELLOW}Connect to Plex using your machine's LAN IP (e.g. 192.168.1.x:32400)${NC}"
-        echo "     Plex uses host networking, so Seerr cannot reach it via container name."
-        echo "     Find your LAN IP with: hostname -I | awk '{print \$1}'"
+        echo -e "   • Connect to Plex using: ${YELLOW}http://plex:32400${NC}"
+        echo "     Plex is on the same Docker network — use the container name."
     else
         echo "   • Sign in and connect to Jellyfin (http://jellyfin:8096)"
     fi
