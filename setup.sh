@@ -871,6 +871,12 @@ PROWLARR_XML_EOF
 generate_env_file() {
     log_step "Generating environment file..."
 
+    # Set the compose profile based on media server choice
+    local compose_profile="plex"
+    if [[ "${MEDIA_SERVER}" == "jellyfin" ]]; then
+        compose_profile="jellyfin"
+    fi
+
     cat > "${ENV_FILE}" << ENV_EOF
 # TorBox Media Server - Environment Configuration
 # Generated on $(date)
@@ -885,11 +891,13 @@ TZ="${TZ}"
 # TorBox
 TORBOX_API_KEY="${TORBOX_API_KEY}"
 
-# Mount paths
+# Paths
+CONFIG_DIR="${CONFIG_DIR}"
+DATA_DIR="${DATA_DIR}"
 MOUNT_DIR="${MOUNT_DIR}"
 
-# Media Server
-MEDIA_SERVER="${MEDIA_SERVER}"
+# Docker Compose Profile (activates only the selected media server)
+COMPOSE_PROFILES="${compose_profile}"
 
 # Plex
 PLEX_CLAIM="${PLEX_CLAIM:-}"
@@ -905,7 +913,7 @@ DECYPHARR_PASS="${DECYPHARR_PASS:-}"
 ENV_EOF
 
     chmod 600 "${ENV_FILE}"
-    log_info "Environment file written."
+    log_info "Environment file written (profile: ${compose_profile})."
 }
 
 # ============================================================================
@@ -913,314 +921,34 @@ ENV_EOF
 # ============================================================================
 
 generate_docker_compose() {
-    log_step "Generating Docker Compose file..."
+    log_step "Setting up Docker Compose..."
 
-    cat > "${COMPOSE_FILE}" << 'COMPOSE_HEADER'
-# ============================================================================
-#  TorBox Media Server - Docker Compose
-#  Auto-generated setup script
-# ============================================================================
+    # Copy static compose file from repo to install directory
+    cp "${SCRIPT_DIR}/docker-compose.yml" "${COMPOSE_FILE}"
 
-networks:
-  media-network:
-    driver: bridge
-
+    # Generate hardware acceleration override (only if needed)
+    if [[ "${HW_ACCEL}" == "intel" ]]; then
+        cat > "${INSTALL_DIR}/docker-compose.override.yml" << 'HW_OVERRIDE'
+# Auto-generated: Intel QuickSync hardware acceleration
+# Active media server gets /dev/dri passthrough
 services:
-COMPOSE_HEADER
-
-    # --- Decypharr ---
-    cat >> "${COMPOSE_FILE}" << COMPOSE_EOF
-  # ── Decypharr ──────────────────────────────────────────────────
-  # Mocks qBittorrent API for Radarr/Sonarr, connects to TorBox,
-  # handles WebDAV mounting via built-in rclone, and creates symlinks.
-  decypharr:
-    image: ${IMAGE_DECYPHARR}
-    container_name: decypharr
-    restart: unless-stopped
-    networks:
-      - media-network
-    ports:
-      - "127.0.0.1:8282:8282"
-    environment:
-      - PUID=\${PUID}
-      - PGID=\${PGID}
-      - UMASK=002
-    volumes:
-      - "${CONFIG_DIR}/decypharr/config.json:/app/config.json:ro"
-      - "${MOUNT_DIR}:/mnt/remote:rshared"
-      - "${DATA_DIR}:/data"
-    devices:
-      - /dev/fuse:/dev/fuse:rwm
-    cap_add:
-      - SYS_ADMIN
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8282"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    security_opt:
-      # Harmless on systems without AppArmor (e.g. CachyOS)
-      - apparmor:unconfined
-
-  # ── Prowlarr ───────────────────────────────────────────────────
-  # Indexer manager - feeds search results to Radarr & Sonarr.
-  prowlarr:
-    image: ${IMAGE_PROWLARR}
-    container_name: prowlarr
-    restart: unless-stopped
-    networks:
-      - media-network
-    ports:
-      - "127.0.0.1:9696:9696"
-    environment:
-      - PUID=\${PUID}
-      - PGID=\${PGID}
-      - TZ=\${TZ}
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    depends_on:
-      - byparr
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9696/ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    volumes:
-      - "${CONFIG_DIR}/prowlarr:/config"
-
-  # ── Byparr ────────────────────────────────────────────────────
-  # Cloudflare bypass proxy (Byparr - drop-in FlareSolverr replacement).
-  byparr:
-    image: ${IMAGE_BYPARR}
-    container_name: byparr
-    restart: unless-stopped
-    networks:
-      - media-network
-    ports:
-      - "127.0.0.1:8191:8191"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    environment:
-      - LOG_LEVEL=info
-      - LOG_HTML=false
-      - TZ=\${TZ}
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8191"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
-  # ── Radarr ─────────────────────────────────────────────────────
-  # Movie management - searches, grabs, and organizes movies.
-  # Uses Decypharr as its download client (qBittorrent mock).
-  radarr:
-    image: ${IMAGE_RADARR}
-    container_name: radarr
-    restart: unless-stopped
-    networks:
-      - media-network
-    ports:
-      - "127.0.0.1:7878:7878"
-    environment:
-      - PUID=\${PUID}
-      - PGID=\${PGID}
-      - TZ=\${TZ}
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    depends_on:
-      - decypharr
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:7878/ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    volumes:
-      - "${CONFIG_DIR}/radarr:/config"
-      - "${DATA_DIR}:/data"
-      - "${MOUNT_DIR}:/mnt/remote:rslave"
-
-  # ── Sonarr ─────────────────────────────────────────────────────
-  # TV show management - searches, grabs, and organizes series.
-  # Uses Decypharr as its download client (qBittorrent mock).
-  sonarr:
-    image: ${IMAGE_SONARR}
-    container_name: sonarr
-    restart: unless-stopped
-    networks:
-      - media-network
-    ports:
-      - "127.0.0.1:8989:8989"
-    environment:
-      - PUID=\${PUID}
-      - PGID=\${PGID}
-      - TZ=\${TZ}
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    depends_on:
-      - decypharr
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8989/ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    volumes:
-      - "${CONFIG_DIR}/sonarr:/config"
-      - "${DATA_DIR}:/data"
-      - "${MOUNT_DIR}:/mnt/remote:rslave"
-
-  # ── Seerr ───────────────────────────────────────────────────────
-  # Media request & discovery frontend. Users request movies/shows
-  # which get sent to Radarr/Sonarr automatically.
-  seerr:
-    image: ${IMAGE_SEERR}
-    container_name: seerr
-    user: "\${PUID}:\${PGID}"
-    restart: unless-stopped
-    networks:
-      - media-network
-    ports:
-      - "127.0.0.1:5055:5055"
-    environment:
-      - TZ=\${TZ}
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:5055"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    volumes:
-      - "${CONFIG_DIR}/seerr:/app/config"
-
-COMPOSE_EOF
-
-    # --- Media Server ---
-    local NVIDIA_ENV=""
-    if [[ "${HW_ACCEL}" == "nvidia" ]]; then
-        NVIDIA_ENV=$'\n      - NVIDIA_VISIBLE_DEVICES=all\n      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility'
-    fi
-
-    if [[ "$MEDIA_SERVER" == "plex" ]]; then
-        cat >> "${COMPOSE_FILE}" << COMPOSE_PLEX
-  # ── Plex ───────────────────────────────────────────────────────
-  # Media server - streams your library to any device.
   plex:
-    image: ${IMAGE_PLEX}
-    container_name: plex
-    restart: unless-stopped
-    networks:
-      - media-network
-    ports:
-      - "32400:32400"
-    environment:
-      - PUID=\${PUID}
-      - PGID=\${PGID}
-      - TZ=\${TZ}
-      - VERSION=docker
-      - PLEX_CLAIM=\${PLEX_CLAIM:-}${NVIDIA_ENV}
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:32400/identity"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-    volumes:
-      - "${CONFIG_DIR}/plex:/config"
-      - "${DATA_DIR}:/data"
-      - "${MOUNT_DIR}:/mnt/remote:rslave"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-COMPOSE_PLEX
-
-        # Inject hardware acceleration for Plex
-        if [[ "${HW_ACCEL}" == "intel" ]]; then
-            cat >> "${COMPOSE_FILE}" << COMPOSE_PLEX_HW
     devices:
       - /dev/dri:/dev/dri
-COMPOSE_PLEX_HW
-        elif [[ "${HW_ACCEL}" == "nvidia" ]]; then
-            cat >> "${COMPOSE_FILE}" << COMPOSE_PLEX_HW
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-COMPOSE_PLEX_HW
-        fi
-    else
-        cat >> "${COMPOSE_FILE}" << COMPOSE_JELLYFIN
-  # ── Jellyfin ───────────────────────────────────────────────────
-  # Free & open-source media server - streams your library to any device.
   jellyfin:
-    image: ${IMAGE_JELLYFIN}
-    container_name: jellyfin
-    restart: unless-stopped
-    networks:
-      - media-network
-    ports:
-      - "8096:8096"
-      - "8920:8920"
-    environment:
-      - PUID=\${PUID}
-      - PGID=\${PGID}
-      - TZ=\${TZ}${NVIDIA_ENV}
-      - JELLYFIN_PublishedServerUrl=http://localhost:8096
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8096/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    volumes:
-      - "${CONFIG_DIR}/jellyfin:/config"
-      - "${DATA_DIR}:/data"
-      - "${MOUNT_DIR}:/mnt/remote:rslave"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-COMPOSE_JELLYFIN
-
-        # Inject hardware acceleration for Jellyfin
-        if [[ "${HW_ACCEL}" == "intel" ]]; then
-            cat >> "${COMPOSE_FILE}" << COMPOSE_JF_HW
     devices:
       - /dev/dri:/dev/dri
-COMPOSE_JF_HW
-        elif [[ "${HW_ACCEL}" == "nvidia" ]]; then
-            cat >> "${COMPOSE_FILE}" << COMPOSE_JF_HW
+HW_OVERRIDE
+        log_info "Hardware acceleration override: Intel QuickSync (/dev/dri)."
+    elif [[ "${HW_ACCEL}" == "nvidia" ]]; then
+        cat > "${INSTALL_DIR}/docker-compose.override.yml" << 'HW_OVERRIDE'
+# Auto-generated: NVIDIA GPU hardware acceleration
+# Active media server gets GPU passthrough
+services:
+  plex:
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
     deploy:
       resources:
         reservations:
@@ -1228,14 +956,25 @@ COMPOSE_JF_HW
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-COMPOSE_JF_HW
-        fi
+  jellyfin:
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+HW_OVERRIDE
+        log_info "Hardware acceleration override: NVIDIA GPU."
     fi
 
     chmod 600 "${COMPOSE_FILE}"
-    log_info "Docker Compose file written."
+    log_info "Docker Compose file set up."
 
-    # Validate the generated Compose file (only if Docker daemon is accessible)
+    # Validate the Compose file (only if Docker daemon is accessible)
     if docker info &>/dev/null || sudo docker info &>/dev/null; then
         if run_with_spinner "Validating Docker Compose file..." compose_cmd config -q; then
             log_info "Docker Compose file validated successfully."
@@ -1346,6 +1085,7 @@ show_help() {
     echo "  enable      Enable auto-start on boot"
     echo "  disable     Disable auto-start on boot"
     echo "  backup      Back up configs and .env"
+    echo "  restore     Restore from a backup (list or specify timestamp)"
     echo "  health      Check health of all services"
     echo "  shell <svc> Open a shell in a service container"
     echo "  help        Show this help"
@@ -1442,6 +1182,59 @@ case "${1:-help}" in
         cp -ra "${SCRIPT_DIR}/configs" "${backup_dir}/" 2>/dev/null || true
         echo -e "${GREEN}Backup saved to: ${backup_dir}${NC}"
         ;;
+    restore)
+        local backups_dir="${SCRIPT_DIR}/backups"
+        if [[ ! -d "${backups_dir}" ]]; then
+            echo -e "${RED}No backups found. Run 'backup' first to create one.${NC}"
+            exit 1
+        fi
+        local target=""
+        if [[ -n "${2:-}" ]]; then
+            target="${backups_dir}/${2}"
+        else
+            # List available backups and let user choose
+            echo -e "${CYAN}Available backups:${NC}"
+            local i=0
+            local -a backup_dirs=()
+            for d in "${backups_dir}"/*/; do
+                if [[ -d "$d" ]]; then
+                    i=$((i + 1))
+                    backup_dirs+=("$d")
+                    echo "  ${i}) $(basename "$d")"
+                fi
+            done
+            if [[ $i -eq 0 ]]; then
+                echo -e "${RED}No backups found.${NC}"
+                exit 1
+            fi
+            read -rp "Select backup number [1-${i}]: " choice
+            if [[ ! "$choice" =~ ^[0-9]+$ ]] || [[ $choice -lt 1 ]] || [[ $choice -gt $i ]]; then
+                echo -e "${RED}Invalid selection.${NC}"
+                exit 1
+            fi
+            target="${backup_dirs[$((choice - 1))]}"
+        fi
+        if [[ ! -d "${target}" ]]; then
+            echo -e "${RED}Backup not found: ${target}${NC}"
+            exit 1
+        fi
+        echo -e "${YELLOW}Restoring from: $(basename "${target}")${NC}"
+        echo -e "${RED}This will overwrite current configuration. Continue?${NC}"
+        read -rp "Type 'yes' to confirm: " confirm
+        if [[ "${confirm}" != "yes" ]]; then
+            echo "Restore cancelled."
+            exit 0
+        fi
+        echo -e "${GREEN}Stopping containers...${NC}"
+        compose_cmd down 2>/dev/null || true
+        # Restore files
+        [[ -f "${target}/.env" ]] && cp -a "${target}/.env" "${ENV_FILE}" && echo "  Restored .env"
+        [[ -f "${target}/docker-compose.yml" ]] && cp -a "${target}/docker-compose.yml" "${COMPOSE_FILE}" && echo "  Restored docker-compose.yml"
+        [[ -d "${target}/configs" ]] && cp -ra "${target}/configs" "${SCRIPT_DIR}/" && echo "  Restored configs/"
+        echo -e "${GREEN}Starting containers...${NC}"
+        compose_cmd up -d --remove-orphans
+        echo -e "${GREEN}Restore complete.${NC}"
+        ;;
     health)
         echo -e "\n${CYAN}━━━━ Service Health ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
         compose_cmd ps
@@ -1520,6 +1313,9 @@ ExecStart=${docker_bin} ${compose_args} --env-file "${ENV_FILE}" -f "${COMPOSE_F
 
 # On stop: bring containers down gracefully
 ExecStop=${docker_bin} ${compose_args} --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" stop
+
+# Clean up bind mount left by FUSE propagation
+ExecStopPost=-/bin/bash -c 'umount -l "${MOUNT_DIR}" || true'
 
 Restart=on-failure
 RestartSec=10

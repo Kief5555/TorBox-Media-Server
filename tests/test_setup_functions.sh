@@ -332,16 +332,14 @@ test_hex_key_validation_with_letters() {
 test_image_versions_not_latest() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local setup_file="${script_dir}/../setup.sh"
-    if [[ ! -f "$setup_file" ]]; then
-        setup_file="${script_dir}/setup.sh"
-    fi
-    if [[ ! -f "$setup_file" ]]; then
-        echo -e "${CYAN}[SKIP]${NC} Cannot find setup.sh to check image versions"
+    # Check the static docker-compose.yml for :latest tags
+    local compose_file="${script_dir}/../docker-compose.yml"
+    if [[ ! -f "$compose_file" ]]; then
+        echo -e "${CYAN}[SKIP]${NC} Cannot find docker-compose.yml to check image versions"
         return
     fi
-    # Check that no IMAGE_* variable uses :latest
-    if grep -qE 'IMAGE_.*:latest' "$setup_file" 2>/dev/null; then
+    # Check that no image uses :latest
+    if grep -qE 'image:.*:latest' "$compose_file" 2>/dev/null; then
         fail "Found Docker images using :latest tag"
     else
         pass "No Docker images use :latest tag"
@@ -355,16 +353,14 @@ test_image_versions_not_latest() {
 test_decypharr_config_mount_readonly() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local setup_file="${script_dir}/../setup.sh"
-    if [[ ! -f "$setup_file" ]]; then
-        setup_file="${script_dir}/setup.sh"
-    fi
-    if [[ ! -f "$setup_file" ]]; then
-        echo -e "${CYAN}[SKIP]${NC} Cannot find setup.sh to check Decypharr mount"
+    # Check the static docker-compose.yml instead of setup.sh
+    local compose_file="${script_dir}/../docker-compose.yml"
+    if [[ ! -f "$compose_file" ]]; then
+        echo -e "${CYAN}[SKIP]${NC} Cannot find docker-compose.yml to check Decypharr mount"
         return
     fi
     # Check that the Decypharr config volume uses file-level :ro mount
-    if grep -q 'config.json:/app/config.json:ro' "$setup_file"; then
+    if grep -q 'config.json:/app/config.json:ro' "$compose_file"; then
         pass "Decypharr config.json is mounted as read-only file"
     else
         fail "Decypharr config should use file-level :ro mount"

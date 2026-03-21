@@ -1,8 +1,8 @@
 # Ignore generated environment variables and secrets
 .env
 
-# Ignore generated Docker Compose file
-docker-compose.yml
+# Ignore generated hardware acceleration override
+docker-compose.override.yml
 
 # Ignore generated management script
 manage.sh
