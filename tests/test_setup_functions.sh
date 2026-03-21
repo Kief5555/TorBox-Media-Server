@@ -3,29 +3,15 @@
 # Comprehensive test suite for TorBox Media Server setup functions
 # Tests key functions extracted from setup.sh without side effects.
 
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/test_utils.sh"
 
-passed=0
-failed=0
-
-pass() { echo -e "${GREEN}[PASS]${NC} $1"; passed=$((passed + 1)); }
-fail() { echo -e "${RED}[FAIL]${NC} $1"; failed=$((failed + 1)); }
+echo -e "${CYAN}Running TorBox Media Server test suite...${NC}"
+echo ""
 
 # ============================================================================
 #  Function: mask_key
 # ============================================================================
-
-mask_key() {
-    local k="$1"
-    if [[ ${#k} -gt 4 ]]; then
-        echo "${k:0:4}...${k: -4}"
-    else
-        echo "$k"
-    fi
-}
 
 test_mask_key_normal() {
     local result
@@ -72,7 +58,6 @@ test_mask_key_5_chars() {
 # ============================================================================
 
 test_port_regex_no_partial_match() {
-    # Port 828 should NOT match in output containing port 8282
     local ss_output="LISTEN  0  128  0.0.0.0:8282  0.0.0.0:*"
     local port=828
     if echo "$ss_output" | grep -qE ":${port}[[:space:]]"; then
@@ -93,7 +78,6 @@ test_port_regex_exact_match() {
 }
 
 test_port_regex_no_false_positive_828() {
-    # Port 8282 should NOT match when checking for port 828
     local ss_output="tcp  LISTEN  0  128  0.0.0.0:8282  0.0.0.0:*"
     local port=828
     if echo "$ss_output" | grep -qE ":${port}[[:space:]]"; then
@@ -104,7 +88,6 @@ test_port_regex_no_false_positive_828() {
 }
 
 test_port_regex_jellyfin_not_plex() {
-    # Port 8096 should match, not 32400
     local ss_output="tcp  LISTEN  0  128  0.0.0.0:8096  0.0.0.0:*"
     if echo "$ss_output" | grep -qE ":8096[[:space:]]"; then
         pass "Port regex matches Jellyfin port 8096"
@@ -330,15 +313,11 @@ test_hex_key_validation_with_letters() {
 # ============================================================================
 
 test_image_versions_not_latest() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    # Check the static docker-compose.yml for :latest tags
-    local compose_file="${script_dir}/../docker-compose.yml"
+    local compose_file="${SCRIPT_DIR}/../docker-compose.yml"
     if [[ ! -f "$compose_file" ]]; then
         echo -e "${CYAN}[SKIP]${NC} Cannot find docker-compose.yml to check image versions"
         return
     fi
-    # Check that no image uses :latest
     if grep -qE 'image:.*:latest' "$compose_file" 2>/dev/null; then
         fail "Found Docker images using :latest tag"
     else
@@ -351,15 +330,11 @@ test_image_versions_not_latest() {
 # ============================================================================
 
 test_decypharr_config_mount_readonly() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    # Check the static docker-compose.yml instead of setup.sh
-    local compose_file="${script_dir}/../docker-compose.yml"
+    local compose_file="${SCRIPT_DIR}/../docker-compose.yml"
     if [[ ! -f "$compose_file" ]]; then
         echo -e "${CYAN}[SKIP]${NC} Cannot find docker-compose.yml to check Decypharr mount"
         return
     fi
-    # Check that the Decypharr config volume uses file-level :ro mount
     if grep -q 'config.json:/app/config.json:ro' "$compose_file"; then
         pass "Decypharr config.json is mounted as read-only file"
     else
@@ -370,9 +345,6 @@ test_decypharr_config_mount_readonly() {
 # ============================================================================
 #  Run all tests
 # ============================================================================
-
-echo -e "${CYAN}Running TorBox Media Server test suite...${NC}"
-echo ""
 
 echo "--- mask_key tests ---"
 test_mask_key_normal
@@ -427,10 +399,8 @@ echo ""
 echo "--- Feature detection tests ---"
 
 test_yes_flag_support() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local setup_file="${script_dir}/../setup.sh"
-    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    local setup_file="${SCRIPT_DIR}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${SCRIPT_DIR}/setup.sh"
     if grep -Fq -- '--yes' "$setup_file"; then
         pass "--yes/--non-interactive flag is supported"
     else
@@ -438,11 +408,29 @@ test_yes_flag_support() {
     fi
 }
 
+test_dry_run_support() {
+    local setup_file="${SCRIPT_DIR}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${setup_file}/setup.sh"
+    if grep -Fq -- '--dry-run' "$setup_file"; then
+        pass "--dry-run flag is supported"
+    else
+        fail "--dry-run flag not found in setup.sh"
+    fi
+}
+
+test_version_flag_support() {
+    local setup_file="${SCRIPT_DIR}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${setup_file}/setup.sh"
+    if grep -Fq -- '--version' "$setup_file"; then
+        pass "--version flag is supported"
+    else
+        fail "--version flag not found in setup.sh"
+    fi
+}
+
 test_hw_auto_detect() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local setup_file="${script_dir}/../setup.sh"
-    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    local setup_file="${SCRIPT_DIR}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${setup_file}/setup.sh"
     if grep -q 'detected_intel' "$setup_file" && grep -q 'detected_nvidia' "$setup_file"; then
         pass "Hardware acceleration auto-detection is implemented"
     else
@@ -451,10 +439,8 @@ test_hw_auto_detect() {
 }
 
 test_seerr_auto_config() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local setup_file="${script_dir}/../setup.sh"
-    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    local setup_file="${SCRIPT_DIR}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${setup_file}/setup.sh"
     if grep -q 'configure_seerr' "$setup_file"; then
         pass "Seerr auto-configuration function exists"
     else
@@ -463,10 +449,8 @@ test_seerr_auto_config() {
 }
 
 test_plex_library_auto_config() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local setup_file="${script_dir}/../setup.sh"
-    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    local setup_file="${SCRIPT_DIR}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${setup_file}/setup.sh"
     if grep -q 'configure_plex_libraries' "$setup_file"; then
         pass "Plex library auto-configuration function exists"
     else
@@ -475,10 +459,8 @@ test_plex_library_auto_config() {
 }
 
 test_default_indexer() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local setup_file="${script_dir}/../setup.sh"
-    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    local setup_file="${SCRIPT_DIR}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${setup_file}/setup.sh"
     if grep -q 'add_default_indexer' "$setup_file"; then
         pass "Default indexer function exists"
     else
@@ -487,6 +469,8 @@ test_default_indexer() {
 }
 
 test_yes_flag_support
+test_dry_run_support
+test_version_flag_support
 test_hw_auto_detect
 test_seerr_auto_config
 test_plex_library_auto_config
@@ -496,10 +480,8 @@ echo ""
 echo "--- Architecture tests ---"
 
 test_no_python3_json_manipulation() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local setup_file="${script_dir}/../setup.sh"
-    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    local setup_file="${SCRIPT_DIR}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${setup_file}/setup.sh"
     if grep -q 'python3 -c' "$setup_file"; then
         fail "setup.sh still uses python3 for JSON manipulation (should use jq)"
     else
@@ -508,10 +490,8 @@ test_no_python3_json_manipulation() {
 }
 
 test_uses_jq_for_json() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local setup_file="${script_dir}/../setup.sh"
-    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    local setup_file="${SCRIPT_DIR}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${setup_file}/setup.sh"
     if grep -q 'jq ' "$setup_file"; then
         pass "setup.sh uses jq for JSON manipulation"
     else
@@ -520,10 +500,8 @@ test_uses_jq_for_json() {
 }
 
 test_no_docker_compose_v1() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local setup_file="${script_dir}/../setup.sh"
-    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    local setup_file="${SCRIPT_DIR}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${setup_file}/setup.sh"
     if grep -qE 'docker-compose[[:space:]]|COMPOSE_CMD=\(docker-compose\)' "$setup_file"; then
         fail "setup.sh still has Docker Compose V1 fallback logic"
     else
@@ -532,10 +510,8 @@ test_no_docker_compose_v1() {
 }
 
 test_nvidia_toolkit_check() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local setup_file="${script_dir}/../setup.sh"
-    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    local setup_file="${SCRIPT_DIR}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${setup_file}/setup.sh"
     if grep -q 'nvidia-container-toolkit' "$setup_file"; then
         pass "nvidia-container-toolkit dependency check is present"
     else
@@ -544,10 +520,8 @@ test_nvidia_toolkit_check() {
 }
 
 test_mount_stacking_guard() {
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local setup_file="${script_dir}/../setup.sh"
-    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    local setup_file="${SCRIPT_DIR}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${setup_file}/setup.sh"
     if grep -q 'findmnt' "$setup_file"; then
         pass "Mount stacking guard (findmnt) is present"
     else
@@ -561,15 +535,5 @@ test_no_docker_compose_v1
 test_nvidia_toolkit_check
 test_mount_stacking_guard
 
-echo ""
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "  ${GREEN}$passed passed${NC}  ${RED}$failed failed${NC}"
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-
-if [[ $failed -eq 0 ]]; then
-    echo -e "\n${GREEN}All tests passed!${NC}"
-    exit 0
-else
-    echo -e "\n${RED}$failed test(s) failed.${NC}"
-    exit 1
-fi
+print_summary
+exit $?

@@ -11,6 +11,9 @@ set -euo pipefail
 #  Designed for CachyOS (Arch-based) but works on most Linux distros.
 # ============================================================================
 
+VERSION="1.0.0"
+DRY_RUN=false
+
 trap 'cleanup_on_interrupt' INT TERM
 
 cleanup_on_interrupt() {
@@ -1007,6 +1010,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 ENV_FILE="${SCRIPT_DIR}/.env"
+VERSION="__VERSION__"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -1097,6 +1101,7 @@ show_help() {
     echo "  restore     Restore from a backup (list or specify timestamp)"
     echo "  health      Check health of all services"
     echo "  shell <svc> Open a shell in a service container"
+    echo "  version     Show version"
     echo "  help        Show this help"
 }
 
@@ -1193,19 +1198,19 @@ case "${1:-help}" in
         echo -e "${GREEN}Backup saved to: ${backup_dir}${NC}"
         ;;
     restore)
-        local backups_dir="${SCRIPT_DIR}/backups"
+        backups_dir="${SCRIPT_DIR}/backups"
         if [[ ! -d "${backups_dir}" ]]; then
             echo -e "${RED}No backups found. Run 'backup' first to create one.${NC}"
             exit 1
         fi
-        local target=""
+        target=""
         if [[ -n "${2:-}" ]]; then
             target="${backups_dir}/${2}"
         else
             # List available backups and let user choose
             echo -e "${CYAN}Available backups:${NC}"
-            local i=0
-            local -a backup_dirs=()
+            i=0
+            backup_dirs=()
             for d in "${backups_dir}"/*/; do
                 if [[ -d "$d" ]]; then
                     i=$((i + 1))
@@ -1268,6 +1273,9 @@ case "${1:-help}" in
         fi
         compose_cmd exec "$2" /bin/bash 2>/dev/null || compose_cmd exec "$2" /bin/sh
         ;;
+    version|--version|-v)
+        echo "TorBox Media Server Management v${VERSION}"
+        ;;
     help|*)
         show_help
         ;;
@@ -1275,6 +1283,7 @@ esac
 MANAGE_EOF
 
     chmod +x "${INSTALL_DIR}/manage.sh"
+    sed -i "s/__VERSION__/${VERSION}/" "${INSTALL_DIR}/manage.sh"
     log_info "Management script created: ${INSTALL_DIR}/manage.sh"
 }
 
@@ -1555,7 +1564,7 @@ configure_arrs() {
     log_section "Auto-Configuring Services via API"
 
     # jq is needed for JSON manipulation in advanced config
-    local HAS_JQ=false
+    HAS_JQ=false
     if command -v jq &>/dev/null; then
         HAS_JQ=true
     else
@@ -1908,7 +1917,7 @@ configure_plex_libraries() {
         # Add Movies library
         curl -sf --connect-timeout 5 --max-time 15 -X POST \
             -H "X-Plex-Token: ${plex_token}" \
-            "${plex_url}/library/sections?name=Movies&type=movie&agent=com.plexapp.agents.imdb&scanner=Plex%20Movie%20Scanner&language=en&location=%2Fdata%2Fmedia%2Fmovies" \
+            "${plex_url}/library/sections?name=Movies&type=movie&agent=tv.plex.agents.movie&scanner=Plex%20Movie&language=en&location=%2Fdata%2Fmedia%2Fmovies" \
             -o /dev/null 2>/dev/null && log_info "  Plex 'Movies' library added." \
             || log_warn "  Failed to add Movies library. You can add it manually in Plex."
     fi
@@ -1919,7 +1928,7 @@ configure_plex_libraries() {
         # Add TV Shows library
         curl -sf --connect-timeout 5 --max-time 15 -X POST \
             -H "X-Plex-Token: ${plex_token}" \
-            "${plex_url}/library/sections?name=TV%20Shows&type=show&agent=com.plexapp.agents.thetvdb&scanner=Plex%20Series%20Scanner&language=en&location=%2Fdata%2Fmedia%2Ftv" \
+            "${plex_url}/library/sections?name=TV%20Shows&type=show&agent=tv.plex.agents.series&scanner=Plex%20Series&language=en&location=%2Fdata%2Fmedia%2Ftv" \
             -o /dev/null 2>/dev/null && log_info "  Plex 'TV Shows' library added." \
             || log_warn "  Failed to add TV Shows library. You can add it manually in Plex."
     fi
@@ -2361,11 +2370,14 @@ main() {
     for arg in "$@"; do
         case "$arg" in
             -y|--yes|--non-interactive) NON_INTERACTIVE=true ;;
+            -d|--dry-run) DRY_RUN=true ;;
             -h|--help)
+                echo "TorBox Media Server Setup v${VERSION}"
                 echo "Usage: ./setup.sh [OPTIONS]"
                 echo ""
                 echo "Options:"
                 echo "  -y, --yes, --non-interactive  Use defaults for all prompts"
+                echo "  -d, --dry-run                 Preview changes without applying them"
                 echo "  -h, --help                    Show this help"
                 echo ""
                 echo "Environment variables for non-interactive mode:"
@@ -2375,6 +2387,10 @@ main() {
                 echo "  TORBOX_MOUNT_DIR      Mount directory (default: /mnt/torbox-media)"
                 echo "  TORBOX_HW_ACCEL       'intel', 'nvidia', or 'none' (auto-detects if unset)"
                 echo "  TORBOX_START_SERVICES 'true' or 'false' (default: true)"
+                exit 0
+                ;;
+            -v|--version)
+                echo "TorBox Media Server Setup v${VERSION}"
                 exit 0
                 ;;
         esac
@@ -2399,6 +2415,45 @@ main() {
     check_dependencies
     gather_config
     check_port_conflicts
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_section "Dry Run — Preview of Actions"
+        echo ""
+        log_info "The following actions WOULD be taken (no changes made):"
+        echo ""
+        echo "  1. Create directories:"
+        echo "     mkdir -p ${INSTALL_DIR}"
+        echo "     mkdir -p ${CONFIG_DIR}/{prowlarr,radarr,sonarr,seerr,decypharr}"
+        echo "     mkdir -p ${DATA_DIR}/{media/{movies,tv},downloads/{radarr,sonarr}}"
+        if [[ "$MEDIA_SERVER" == "plex" ]]; then
+            echo "     mkdir -p ${CONFIG_DIR}/plex"
+        else
+            echo "     mkdir -p ${CONFIG_DIR}/jellyfin"
+        fi
+        echo "     sudo mkdir -p ${MOUNT_DIR}"
+        echo ""
+        echo "  2. Generate configs:"
+        echo "     ${CONFIG_DIR}/decypharr/config.json (TorBox API key, WebDAV, rclone)"
+        echo "     ${CONFIG_DIR}/radarr/config.xml (API key: $(mask_key "${RADARR_API_KEY:-pending}"))"
+        echo "     ${CONFIG_DIR}/sonarr/config.xml (API key: $(mask_key "${SONARR_API_KEY:-pending}"))"
+        echo "     ${CONFIG_DIR}/prowlarr/config.xml (API key: $(mask_key "${PROWLARR_API_KEY:-pending}"))"
+        echo ""
+        echo "  3. Generate files:"
+        echo "     ${ENV_FILE}"
+        echo "     ${COMPOSE_FILE}"
+        echo "     ${INSTALL_DIR}/manage.sh"
+        echo ""
+        echo "  4. Set up systemd service: torbox-media-server"
+        echo ""
+        echo "  5. Start Docker containers:"
+        echo "     decypharr, prowlarr, byparr, radarr, sonarr, seerr, ${MEDIA_SERVER}"
+        echo ""
+        echo "  6. Auto-configure via API (download clients, root folders, naming, etc.)"
+        echo ""
+        log_info "Re-run without --dry-run to apply these changes."
+        exit 0
+    fi
+
     create_directories
     generate_decypharr_config
     generate_arr_configs

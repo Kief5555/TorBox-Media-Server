@@ -103,8 +103,8 @@ else
 fi
 
 # Remove the Docker network (dynamically computed from project directory name)
-local_project_name="$(basename "${SCRIPT_DIR}")"
-docker network rm "${local_project_name}_media-network" 2>/dev/null || true
+project_name="$(basename "${SCRIPT_DIR}")"
+docker network rm "${project_name}_media-network" 2>/dev/null || true
 
 # Step 2: Remove systemd service
 log_info "Removing systemd service..."
@@ -136,10 +136,10 @@ if [[ -n "${MOUNT_DIR}" && -d "${MOUNT_DIR}" ]]; then
 fi
 
 # Step 4: Read images before deleting directory (for optional cleanup later)
-local_images=()
+_images=()
 if [[ -f "${COMPOSE_FILE}" ]]; then
     while IFS= read -r img; do
-        [[ -n "$img" ]] && local_images+=("$img")
+        [[ -n "$img" ]] && _images+=("$img")
     done < <(grep 'image:' "${COMPOSE_FILE}" | awk '{print $2}')
 fi
 
@@ -158,8 +158,8 @@ fi
 if [[ "${remove_images,,}" == "y" ]]; then
     log_info "Removing Docker images..."
     local_removed=0
-    if [[ ${#local_images[@]} -gt 0 ]]; then
-        for img in "${local_images[@]}"; do
+    if [[ ${#_images[@]} -gt 0 ]]; then
+        for img in "${_images[@]}"; do
             if docker rmi "$img" 2>/dev/null; then
                 log_info "  Removed: $img"
                 local_removed=$((local_removed + 1))
