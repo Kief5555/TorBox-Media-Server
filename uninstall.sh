@@ -43,7 +43,8 @@ compose_cmd() {
     if [[ ${#COMPOSE_CMD[@]} -eq 0 ]]; then
         detect_compose_cmd
     fi
-    "${COMPOSE_CMD[@]}" --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
+    # CD into directory so Docker auto-discovers both docker-compose.yml and docker-compose.override.yml
+    (cd "${INSTALL_DIR}" && "${COMPOSE_CMD[@]}" --env-file "${ENV_FILE}" "$@")
 }
 
 echo -e "${CYAN}"

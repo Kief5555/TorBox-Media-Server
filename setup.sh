@@ -170,6 +170,9 @@ compose_cmd() {
     # CD into directory so Docker auto-discovers both docker-compose.yml and docker-compose.override.yml
     (cd "${INSTALL_DIR}" && "${COMPOSE_CMD[@]}" --env-file "${ENV_FILE}" "$@")
 }
+
+# ============================================================================
+#  Dependency Checks
 # ============================================================================
 
 check_dependencies() {
