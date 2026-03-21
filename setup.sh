@@ -146,21 +146,13 @@ COMPOSE_CMD=()
 _COMPOSE_SUDO_WARNED=false
 detect_compose_cmd() {
     if docker info &>/dev/null; then
-        if docker compose version &>/dev/null; then
-            COMPOSE_CMD=(docker compose)
-        else
-            COMPOSE_CMD=(docker-compose)
-        fi
+        COMPOSE_CMD=(docker compose)
     else
         if [[ "$_COMPOSE_SUDO_WARNED" != "true" ]]; then
             log_warn "Docker socket not accessible in current shell — using sudo."
             _COMPOSE_SUDO_WARNED=true
         fi
-        if sudo docker compose version &>/dev/null; then
-            COMPOSE_CMD=(sudo docker compose)
-        else
-            COMPOSE_CMD=(sudo docker-compose)
-        fi
+        COMPOSE_CMD=(sudo docker compose)
     fi
 }
 
@@ -187,14 +179,16 @@ check_dependencies() {
 
     if docker compose version &>/dev/null; then
         log_info "Docker Compose: using v2 plugin (docker compose)."
-    elif command -v docker-compose &>/dev/null; then
-        log_info "Docker Compose: using v1 standalone (docker-compose)."
     else
         missing+=("docker-compose")
     fi
 
     if ! command -v curl &>/dev/null; then
         missing+=("curl")
+    fi
+
+    if ! command -v jq &>/dev/null; then
+        missing+=("jq")
     fi
 
     if [[ ${#missing[@]} -gt 0 ]]; then
@@ -333,6 +327,9 @@ install_dependencies() {
                 curl)
                     sudo pacman -S --noconfirm curl
                     ;;
+                jq)
+                    sudo pacman -S --noconfirm jq
+                    ;;
             esac
         done
     elif command -v apt-get &>/dev/null; then
@@ -350,6 +347,9 @@ install_dependencies() {
                 curl)
                     sudo apt-get install -y curl
                     ;;
+                jq)
+                    sudo apt-get install -y jq
+                    ;;
             esac
         done
     elif command -v dnf &>/dev/null; then
@@ -365,6 +365,9 @@ install_dependencies() {
                     ;;
                 curl)
                     sudo dnf install -y curl
+                    ;;
+                jq)
+                    sudo dnf install -y jq
                     ;;
             esac
         done
@@ -608,6 +611,27 @@ gather_config() {
                     esac
                 done
             fi
+        fi
+    fi
+
+    # Verify nvidia-container-toolkit is installed if NVIDIA is selected
+    if [[ "${HW_ACCEL}" == "nvidia" ]]; then
+        if ! command -v nvidia-container-runtime &>/dev/null && \
+           ! dpkg -l nvidia-container-toolkit &>/dev/null 2>&1 && \
+           ! rpm -q nvidia-container-toolkit &>/dev/null 2>&1 && \
+           ! pacman -Qi nvidia-container-toolkit &>/dev/null 2>&1; then
+            log_error "NVIDIA GPU detected but nvidia-container-toolkit is not installed."
+            log_error "Docker cannot use NVIDIA GPUs without the container toolkit."
+            echo ""
+            echo "  Install it with:"
+            echo "    Arch/CachyOS: sudo pacman -S nvidia-container-toolkit"
+            echo "    Debian/Ubuntu: sudo apt install nvidia-container-toolkit"
+            echo "    Fedora: sudo dnf install nvidia-container-toolkit"
+            echo ""
+            log_info "Falling back to software transcoding."
+            HW_ACCEL="none"
+        else
+            log_info "nvidia-container-toolkit is installed."
         fi
     fi
 
@@ -1253,21 +1277,13 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 
 detect_compose_cmd() {
     if docker info &>/dev/null; then
-        if docker compose version &>/dev/null; then
-            COMPOSE_CMD=(docker compose)
-        else
-            COMPOSE_CMD=(docker-compose)
-        fi
+        COMPOSE_CMD=(docker compose)
     else
         if [[ "$_COMPOSE_SUDO_WARNED" != "true" ]]; then
             log_warn "Docker socket not accessible in current shell — using sudo."
             _COMPOSE_SUDO_WARNED=true
         fi
-        if sudo docker compose version &>/dev/null; then
-            COMPOSE_CMD=(sudo docker compose)
-        else
-            COMPOSE_CMD=(sudo docker-compose)
-        fi
+        COMPOSE_CMD=(sudo docker compose)
     fi
 }
 
@@ -1457,24 +1473,12 @@ generate_systemd_service() {
     local service_name="torbox-media-server"
     local service_file="/etc/systemd/system/${service_name}.service"
 
-    # Resolve absolute path and compose subcommand for systemd ExecStart
+    # Resolve absolute path for systemd ExecStart (V2 only — V1 deprecated July 2023)
     local docker_bin compose_args
-    if docker compose version &>/dev/null; then
-        docker_bin="$(command -v docker)"
-        compose_args="compose"
-    elif docker-compose version &>/dev/null; then
-        docker_bin="$(command -v docker-compose)"
-        compose_args=""
-    elif sudo docker compose version &>/dev/null; then
-        docker_bin="$(command -v docker)"
-        compose_args="compose"
-    elif sudo docker-compose version &>/dev/null; then
-        docker_bin="$(command -v docker-compose)"
-        compose_args=""
-    else
-        log_warn "Could not detect Docker Compose. Systemd service may not work."
-        docker_bin="docker"
-        compose_args="compose"
+    docker_bin="$(command -v docker)"
+    compose_args="compose"
+    if ! docker compose version &>/dev/null && ! sudo docker compose version &>/dev/null; then
+        log_warn "Docker Compose v2 not detected. Systemd service may not work."
     fi
 
     sudo tee "${service_file}" > /dev/null << SYSTEMD_EOF
@@ -1488,9 +1492,9 @@ Wants=network-online.target
 Type=simple
 
 # Step 1: Set up FUSE mount propagation (required for rclone WebDAV in Decypharr)
-# Prefixed with - to tolerate already-mounted state (idempotent)
-ExecStartPre=-$(command -v mount) --bind "${MOUNT_DIR}" "${MOUNT_DIR}"
-ExecStartPre=-$(command -v mount) --make-shared "${MOUNT_DIR}"
+# Guard with findmnt to prevent mount stacking on repeated restarts
+ExecStartPre=/bin/bash -c 'findmnt -n "${MOUNT_DIR}" >/dev/null 2>&1 || mount --bind "${MOUNT_DIR}" "${MOUNT_DIR}"'
+ExecStartPre=/bin/bash -c 'mount --make-shared "${MOUNT_DIR}"'
 
 # Step 2: Start all containers (foreground so systemd tracks the process)
 ExecStart=${docker_bin} ${compose_args} --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up --remove-orphans
@@ -1589,17 +1593,11 @@ DCJSON_EOF
         log_info "  ${name} already has root folder '${root_path}' configured."
     fi
 
-    # Advanced configuration (requires python3 for JSON manipulation)
-    if [[ "${HAS_PYTHON3:-false}" == "true" ]]; then
-        update_arr_config "${name}" "$url" "$api_key" "config/mediamanagement" "
-c['copyUsingHardlinks'] = False
-c['importExtraFiles'] = True
-c['extraFileExtensions'] = 'srt,sub,idx,ass,ssa,nfo'
-c['${unmonitor_field}'] = False
-c['recycleBin'] = ''
-c['recycleBinCleanupDays'] = 0
-c['minimumFreeSpaceWhenImporting'] = 100
-" && log_info "  Media management configured (hardlinks disabled for debrid)." \
+    # Advanced configuration (requires jq for JSON manipulation)
+    if [[ "${HAS_JQ:-false}" == "true" ]]; then
+        update_arr_config "${name}" "$url" "$api_key" "config/mediamanagement" \
+            ".copyUsingHardlinks = false | .importExtraFiles = true | .extraFileExtensions = \"srt,sub,idx,ass,ssa,nfo\" | .${unmonitor_field} = false | .recycleBin = \"\" | .recycleBinCleanupDays = 0 | .minimumFreeSpaceWhenImporting = 100" \
+            && log_info "  Media management configured (hardlinks disabled for debrid)." \
           || log_warn "  Failed to configure media management."
 
         update_arr_config "${name}" "$url" "$api_key" "config/naming" "${naming_updates}" \
@@ -1658,23 +1656,18 @@ c['minimumFreeSpaceWhenImporting'] = 100
     fi
 }
 
-# Helper: GET a *arr config section, modify fields with python3, PUT it back
+# Helper: GET a *arr config section, modify fields with jq, PUT it back
 update_arr_config() {
-    local name="$1" url="$2" api_key="$3" endpoint="$4" python_updates="$5"
+    local name="$1" url="$2" api_key="$3" endpoint="$4" jq_updates="$5"
     local config config_id updated
 
     config=$(curl -sf --connect-timeout 5 --max-time 15 -H "X-Api-Key: ${api_key}" "${url}/api/v3/${endpoint}" 2>/dev/null) || true
     [[ -z "$config" ]] && { log_warn "  Could not retrieve ${name} ${endpoint}."; return 1; }
 
-    config_id=$(python3 -c "import json,sys; print(json.loads(sys.stdin.read())['id'])" <<< "$config" 2>/dev/null) || true
-    [[ -z "$config_id" ]] && { log_warn "  Could not parse ${name} ${endpoint} ID."; return 1; }
+    config_id=$(echo "$config" | jq -r '.id' 2>/dev/null) || true
+    [[ -z "$config_id" || "$config_id" == "null" ]] && { log_warn "  Could not parse ${name} ${endpoint} ID."; return 1; }
 
-    updated=$(python3 -c "
-import json, sys
-c = json.loads(sys.stdin.read())
-${python_updates}
-print(json.dumps(c))
-" <<< "$config" 2>/dev/null) || true
+    updated=$(echo "$config" | jq "$jq_updates" 2>/dev/null) || true
     [[ -z "$updated" ]] && { log_warn "  Could not update ${name} ${endpoint}."; return 1; }
 
     curl -sf --connect-timeout 5 --max-time 15 -X PUT -H "Content-Type: application/json" -H "X-Api-Key: ${api_key}" \
@@ -1689,27 +1682,25 @@ configure_quality_profiles() {
     profiles=$(curl -sf --connect-timeout 5 --max-time 15 -H "X-Api-Key: ${api_key}" "${url}/api/v3/qualityprofile" 2>/dev/null) || true
     [[ -z "$profiles" || "$profiles" == "[]" ]] && return 0
 
-    python3 -c "
-import json, sys, urllib.request
-profiles = json.loads(sys.argv[1])
-url = sys.argv[2]
-api_key = sys.argv[3]
-ok = 0
-for p in profiles:
-    p['upgradeAllowed'] = True
-    req = urllib.request.Request(
-        url + '/api/v3/qualityprofile/' + str(p['id']),
-        data=json.dumps(p).encode(),
-        headers={'Content-Type': 'application/json', 'X-Api-Key': api_key},
-        method='PUT'
-    )
-    try:
-        urllib.request.urlopen(req)
-        ok += 1
-    except Exception:
-        pass
-sys.exit(0 if ok > 0 else 1)
-" "$profiles" "$url" "$api_key" 2>/dev/null
+    local updated_profiles
+    updated_profiles=$(echo "$profiles" | jq '[.[] | .upgradeAllowed = true]' 2>/dev/null) || true
+    [[ -z "$updated_profiles" || "$updated_profiles" == "[]" ]] && return 1
+
+    local ok=0
+    local profile_ids
+    profile_ids=$(echo "$updated_profiles" | jq -r '.[].id' 2>/dev/null) || true
+    for pid in $profile_ids; do
+        local profile_data
+        profile_data=$(echo "$updated_profiles" | jq --argjson id "$pid" '.[] | select(.id == $id)' 2>/dev/null) || true
+        if curl -sf --connect-timeout 5 --max-time 15 -X PUT \
+            -H "Content-Type: application/json" \
+            -H "X-Api-Key: ${api_key}" \
+            "${url}/api/v3/qualityprofile/${pid}" \
+            -d "$profile_data" -o /dev/null 2>/dev/null; then
+            ok=$((ok + 1))
+        fi
+    done
+    [[ $ok -gt 0 ]] && return 0 || return 1
 }
 
 wait_for_service() {
@@ -1736,12 +1727,12 @@ wait_for_service() {
 configure_arrs() {
     log_section "Auto-Configuring Services via API"
 
-    # python3 is needed for JSON manipulation in advanced config
-    local HAS_PYTHON3=false
-    if command -v python3 &>/dev/null; then
-        HAS_PYTHON3=true
+    # jq is needed for JSON manipulation in advanced config
+    local HAS_JQ=false
+    if command -v jq &>/dev/null; then
+        HAS_JQ=true
     else
-        log_warn "python3 not found. Advanced config (naming, media management, quality profiles) will be skipped."
+        log_warn "jq not found. Advanced config (naming, media management, quality profiles) will be skipped."
     fi
 
     local radarr_url="http://localhost:${SVC_PORTS[radarr]}"
@@ -1750,34 +1741,28 @@ configure_arrs() {
 
     # Wait for all three services (Prowlarr uses API v1, Radarr/Sonarr use v3)
     local radarr_ready=false sonarr_ready=false prowlarr_ready=false
-    wait_for_service "Radarr" "$radarr_url" "$RADARR_API_KEY" 90 "v3" && radarr_ready=true
-    wait_for_service "Sonarr" "$sonarr_url" "$SONARR_API_KEY" 90 "v3" && sonarr_ready=true
-    wait_for_service "Prowlarr" "$prowlarr_url" "$PROWLARR_API_KEY" 90 "v1" && prowlarr_ready=true
+    if wait_for_service "Radarr" "$radarr_url" "$RADARR_API_KEY" 90 "v3"; then
+        radarr_ready=true
+        sleep 3  # Allow SQLite database to fully initialize after HTTP readiness
+    fi
+    if wait_for_service "Sonarr" "$sonarr_url" "$SONARR_API_KEY" 90 "v3"; then
+        sonarr_ready=true
+        sleep 3
+    fi
+    if wait_for_service "Prowlarr" "$prowlarr_url" "$PROWLARR_API_KEY" 90 "v1"; then
+        prowlarr_ready=true
+        sleep 3
+    fi
 
     # --- Radarr ---
     if [[ "$radarr_ready" == "true" ]]; then
-        local radarr_naming="
-c['renameMovies'] = True
-c['replaceIllegalCharacters'] = True
-c['colonReplacementFormat'] = 'dash'
-c['standardMovieFormat'] = '{Movie CleanTitle} ({Release Year}) [{Quality Full}]'
-c['movieFolderFormat'] = '{Movie CleanTitle} ({Release Year}) [imdbid-{ImdbId}]'
-"
+        local radarr_naming='.renameMovies = true | .replaceIllegalCharacters = true | .colonReplacementFormat = "dash" | .standardMovieFormat = "{Movie CleanTitle} ({Release Year}) [{Quality Full}]" | .movieFolderFormat = "{Movie CleanTitle} ({Release Year}) [imdbid-{ImdbId}]"'
         configure_arr_service "Radarr" "$radarr_url" "$RADARR_API_KEY" "radarr" 7878 "/data/media/movies" "$radarr_naming"
     fi
 
     # --- Sonarr ---
     if [[ "$sonarr_ready" == "true" ]]; then
-        local sonarr_naming="
-c['renameEpisodes'] = True
-c['replaceIllegalCharacters'] = True
-c['colonReplacementFormat'] = 4
-c['standardEpisodeFormat'] = '{Series TitleYear} - S{season:00}E{episode:00} - {Episode CleanTitle} [{Quality Full}]'
-c['dailyEpisodeFormat'] = '{Series TitleYear} - {Air-Date} - {Episode CleanTitle} [{Quality Full}]'
-c['animeEpisodeFormat'] = '{Series TitleYear} - S{season:00}E{episode:00} - {Episode CleanTitle} [{Quality Full}]'
-c['seasonFolderFormat'] = 'Season {season:00}'
-c['seriesFolderFormat'] = '{Series TitleYear}'
-"
+        local sonarr_naming='.renameEpisodes = true | .replaceIllegalCharacters = true | .colonReplacementFormat = 4 | .standardEpisodeFormat = "{Series TitleYear} - S{season:00}E{episode:00} - {Episode CleanTitle} [{Quality Full}]" | .dailyEpisodeFormat = "{Series TitleYear} - {Air-Date} - {Episode CleanTitle} [{Quality Full}]" | .animeEpisodeFormat = "{Series TitleYear} - S{season:00}E{episode:00} - {Episode CleanTitle} [{Quality Full}]" | .seasonFolderFormat = "Season {season:00}" | .seriesFolderFormat = "{Series TitleYear}"'
         configure_arr_service "Sonarr" "$sonarr_url" "$SONARR_API_KEY" "sonarr" 8989 "/data/media/tv" "$sonarr_naming"
     fi
 
@@ -1933,8 +1918,8 @@ configure_seerr() {
             "http://localhost:${SVC_PORTS[radarr]}/api/v3/qualityprofile" 2>/dev/null) || true
         if [[ -n "$radarr_profiles" ]]; then
             local _id _name
-            _id=$(echo "$radarr_profiles" | python3 -c "import json,sys; p=json.loads(sys.stdin.read()); print(p[0]['id'] if p else 1)" 2>/dev/null) || true
-            _name=$(echo "$radarr_profiles" | python3 -c "import json,sys; p=json.loads(sys.stdin.read()); print(p[0]['name'] if p else 'HD-1080p')" 2>/dev/null) || true
+            _id=$(echo "$radarr_profiles" | jq -r '.[0].id // empty' 2>/dev/null) || true
+            _name=$(echo "$radarr_profiles" | jq -r '.[0].name // empty' 2>/dev/null) || true
             [[ -n "$_id" ]] && radarr_profile_id="$_id"
             [[ -n "$_name" ]] && radarr_profile_name="$_name"
         fi
@@ -1973,8 +1958,8 @@ configure_seerr() {
             "http://localhost:${SVC_PORTS[sonarr]}/api/v3/qualityprofile" 2>/dev/null) || true
         if [[ -n "$sonarr_profiles" ]]; then
             local _id _name
-            _id=$(echo "$sonarr_profiles" | python3 -c "import json,sys; p=json.loads(sys.stdin.read()); print(p[0]['id'] if p else 1)" 2>/dev/null) || true
-            _name=$(echo "$sonarr_profiles" | python3 -c "import json,sys; p=json.loads(sys.stdin.read()); print(p[0]['name'] if p else 'HD-1080p')" 2>/dev/null) || true
+            _id=$(echo "$sonarr_profiles" | jq -r '.[0].id // empty' 2>/dev/null) || true
+            _name=$(echo "$sonarr_profiles" | jq -r '.[0].name // empty' 2>/dev/null) || true
             [[ -n "$_id" ]] && sonarr_profile_id="$_id"
             [[ -n "$_name" ]] && sonarr_profile_name="$_name"
         fi
@@ -2111,6 +2096,12 @@ configure_plex_libraries() {
             -o /dev/null 2>/dev/null && log_info "  Plex 'TV Shows' library added." \
             || log_warn "  Failed to add TV Shows library. You can add it manually in Plex."
     fi
+
+    # Remove expired claim token from .env (token expires in 4 min and is single-use)
+    if [[ -f "${ENV_FILE}" ]]; then
+        sed -i '/^PLEX_CLAIM=/d' "${ENV_FILE}"
+        log_info "  Plex claim token removed from .env (expired after first use)."
+    fi
 }
 
 # ============================================================================
@@ -2181,18 +2172,12 @@ configure_arr_auth() {
 
     # Set auth to Forms (login page) for local addresses
     local auth_id
-    auth_id=$(echo "$auth_config" | python3 -c "import json,sys; print(json.loads(sys.stdin.read())['id'])" 2>/dev/null) || true
-    [[ -z "$auth_id" ]] && { log_warn "  Could not parse ${name} auth config ID."; return 1; }
+    auth_id=$(echo "$auth_config" | jq -r '.id' 2>/dev/null) || true
+    [[ -z "$auth_id" || "$auth_id" == "null" ]] && { log_warn "  Could not parse ${name} auth config ID."; return 1; }
 
     # Update auth config to Forms with DisabledForLocalAddresses
     local updated_auth
-    updated_auth=$(echo "$auth_config" | python3 -c "
-import json, sys
-c = json.loads(sys.stdin.read())
-c['authenticationMethod'] = 'Forms'
-c['authenticationRequired'] = 'DisabledForLocalAddresses'
-print(json.dumps(c))
-" 2>/dev/null) || true
+    updated_auth=$(echo "$auth_config" | jq '.authenticationMethod = "Forms" | .authenticationRequired = "DisabledForLocalAddresses"' 2>/dev/null) || true
     [[ -z "$updated_auth" ]] && { log_warn "  Could not update ${name} auth config."; return 1; }
 
     curl -sf --connect-timeout 5 --max-time 15 -X PUT \

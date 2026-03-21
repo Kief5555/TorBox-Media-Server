@@ -33,17 +33,9 @@ env_val() {
 COMPOSE_CMD=()
 detect_compose_cmd() {
     if docker info &>/dev/null; then
-        if docker compose version &>/dev/null; then
-            COMPOSE_CMD=(docker compose)
-        else
-            COMPOSE_CMD=(docker-compose)
-        fi
+        COMPOSE_CMD=(docker compose)
     else
-        if sudo docker compose version &>/dev/null; then
-            COMPOSE_CMD=(sudo docker compose)
-        else
-            COMPOSE_CMD=(sudo docker-compose)
-        fi
+        COMPOSE_CMD=(sudo docker compose)
     fi
 }
 

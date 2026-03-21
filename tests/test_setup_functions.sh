@@ -497,6 +497,75 @@ test_plex_library_auto_config
 test_default_indexer
 
 echo ""
+echo "--- Architecture tests ---"
+
+test_no_python3_json_manipulation() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local setup_file="${script_dir}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    if grep -q 'python3 -c' "$setup_file"; then
+        fail "setup.sh still uses python3 for JSON manipulation (should use jq)"
+    else
+        pass "No python3 JSON manipulation in setup.sh (uses jq)"
+    fi
+}
+
+test_uses_jq_for_json() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local setup_file="${script_dir}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    if grep -q 'jq ' "$setup_file"; then
+        pass "setup.sh uses jq for JSON manipulation"
+    else
+        fail "No jq usage found in setup.sh"
+    fi
+}
+
+test_no_docker_compose_v1() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local setup_file="${script_dir}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    if grep -qE 'docker-compose[[:space:]]|COMPOSE_CMD=\(docker-compose\)' "$setup_file"; then
+        fail "setup.sh still has Docker Compose V1 fallback logic"
+    else
+        pass "No Docker Compose V1 fallback in setup.sh"
+    fi
+}
+
+test_nvidia_toolkit_check() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local setup_file="${script_dir}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    if grep -q 'nvidia-container-toolkit' "$setup_file"; then
+        pass "nvidia-container-toolkit dependency check is present"
+    else
+        fail "nvidia-container-toolkit check not found"
+    fi
+}
+
+test_mount_stacking_guard() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local setup_file="${script_dir}/../setup.sh"
+    [[ ! -f "$setup_file" ]] && setup_file="${script_dir}/setup.sh"
+    if grep -q 'findmnt' "$setup_file"; then
+        pass "Mount stacking guard (findmnt) is present"
+    else
+        fail "Mount stacking guard not found"
+    fi
+}
+
+test_no_python3_json_manipulation
+test_uses_jq_for_json
+test_no_docker_compose_v1
+test_nvidia_toolkit_check
+test_mount_stacking_guard
+
+echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "  ${GREEN}$passed passed${NC}  ${RED}$failed failed${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
