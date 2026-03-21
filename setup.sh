@@ -236,12 +236,17 @@ check_port_conflicts() {
         port_names+=("Jellyfin" "Jellyfin HTTPS")
     fi
     local conflicts=false
+    local network_stats=""
+    if command -v ss &>/dev/null; then
+        network_stats=$(ss -tlnp 2>/dev/null)
+    elif command -v netstat &>/dev/null; then
+        network_stats=$(netstat -tlnp 2>/dev/null)
+    fi
+
     for i in "${!ports_to_check[@]}"; do
         local port_in_use=false
-        if command -v ss &>/dev/null; then
-            ss -tlnp 2>/dev/null | grep -q ":${ports_to_check[$i]} " 2>/dev/null && port_in_use=true
-        elif command -v netstat &>/dev/null; then
-            netstat -tlnp 2>/dev/null | grep -q ":${ports_to_check[$i]} " 2>/dev/null && port_in_use=true
+        if [[ "$network_stats" =~ :${ports_to_check[$i]}[[:space:]] ]]; then
+            port_in_use=true
         fi
         if [[ "$port_in_use" == "true" ]]; then
             log_warn "Port ${ports_to_check[$i]} (${port_names[$i]}) is already in use."
