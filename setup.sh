@@ -1065,7 +1065,8 @@ ensure_mount_propagation() {
     mount_dir="$(env_val MOUNT_DIR)"
     if [[ -n "${mount_dir}" ]]; then
         echo -e "${YELLOW}Requesting sudo privileges to re-apply FUSE mounts...${NC}"
-        sudo mount --bind "${mount_dir}" "${mount_dir}" 2>/dev/null || true
+        # Guard with findmnt to prevent mount stacking
+        sudo bash -c "findmnt -n '${mount_dir}' >/dev/null 2>&1 || mount --bind '${mount_dir}' '${mount_dir}'" 2>/dev/null || true
         sudo mount --make-shared "${mount_dir}" 2>/dev/null || true
     fi
 }
@@ -1098,7 +1099,8 @@ show_help() {
 
 show_urls() {
     local media_server svc
-    media_server="$(env_val MEDIA_SERVER)"
+    media_server="$(env_val COMPOSE_PROFILES)"
+    [[ -z "$media_server" ]] && media_server="$(env_val MEDIA_SERVER)"
     echo -e "\n${CYAN}━━━━ Service URLs ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
     for svc in "${SVC_ORDER[@]}"; do
         printf "  %b%-14s%b http://localhost:%s\n" "$BOLD" "${SVC_LABELS[$svc]}" "$NC" "${SVC_PORTS[$svc]}"
