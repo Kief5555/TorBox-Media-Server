@@ -167,11 +167,9 @@ compose_cmd() {
     if [[ ${#COMPOSE_CMD[@]} -eq 0 ]]; then
         detect_compose_cmd
     fi
-    "${COMPOSE_CMD[@]}" --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
+    # CD into directory so Docker auto-discovers both docker-compose.yml and docker-compose.override.yml
+    (cd "${INSTALL_DIR}" && "${COMPOSE_CMD[@]}" --env-file "${ENV_FILE}" "$@")
 }
-
-# ============================================================================
-#  Dependency Checks
 # ============================================================================
 
 check_dependencies() {
@@ -1052,7 +1050,8 @@ compose_cmd() {
     if [[ ${#COMPOSE_CMD[@]} -eq 0 ]]; then
         detect_compose_cmd
     fi
-    "${COMPOSE_CMD[@]}" --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
+    # CD into directory so Docker auto-discovers both docker-compose.yml and docker-compose.override.yml
+    (cd "${SCRIPT_DIR}" && "${COMPOSE_CMD[@]}" --env-file "${ENV_FILE}" "$@")
 }
 MANAGE_INLINE
 
@@ -1314,10 +1313,10 @@ ExecStartPre=/bin/bash -c 'findmnt -n "${MOUNT_DIR}" >/dev/null 2>&1 || mount --
 ExecStartPre=/bin/bash -c 'mount --make-shared "${MOUNT_DIR}"'
 
 # Step 2: Start all containers (foreground so systemd tracks the process)
-ExecStart=${docker_bin} ${compose_args} --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up --remove-orphans
+ExecStart=${docker_bin} ${compose_args} --env-file "${ENV_FILE}" up --remove-orphans
 
 # On stop: bring containers down gracefully
-ExecStop=${docker_bin} ${compose_args} --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" stop
+ExecStop=${docker_bin} ${compose_args} --env-file "${ENV_FILE}" stop
 
 # Clean up bind mount left by FUSE propagation
 ExecStopPost=-/bin/bash -c 'umount -l "${MOUNT_DIR}" || true'

@@ -114,10 +114,10 @@ MOUNT_DIR="$(env_val MOUNT_DIR)"
 if [[ -n "${MOUNT_DIR}" && -d "${MOUNT_DIR}" ]]; then
     # Unmount any FUSE mounts inside the mount directory
     if mountpoint -q "${MOUNT_DIR}" 2>/dev/null; then
-        sudo umount "${MOUNT_DIR}" 2>/dev/null || true
+        sudo umount -l "${MOUNT_DIR}" 2>/dev/null || true
     fi
     # Also try to unmount the bind mount
-    sudo umount "${MOUNT_DIR}" 2>/dev/null || true
+    sudo umount -l "${MOUNT_DIR}" 2>/dev/null || true
     sudo rmdir "${MOUNT_DIR}" 2>/dev/null || {
         log_warn "Could not remove mount directory ${MOUNT_DIR} (may not be empty)."
     }
@@ -133,19 +133,15 @@ echo ""
 read -rp "Remove Docker images to free ~5-8 GB of disk space? [y/N]: " remove_images
 if [[ "${remove_images,,}" == "y" ]]; then
     log_info "Removing Docker images..."
-    for img in \
-        cy01/blackhole \
-        lscr.io/linuxserver/prowlarr \
-        ghcr.io/thephaseless/byparr \
-        lscr.io/linuxserver/radarr \
-        lscr.io/linuxserver/sonarr \
-        ghcr.io/seerr-team/seerr \
-        lscr.io/linuxserver/plex \
-        lscr.io/linuxserver/jellyfin \
-    ; do
-        docker rmi "$img" 2>/dev/null && log_info "  Removed: $img" || true
-    done
-    log_info "Docker images removed."
+    if [[ -f "${COMPOSE_FILE}" ]]; then
+        # Dynamically extract the exact pinned images from the compose file
+        for img in $(grep 'image:' "${COMPOSE_FILE}" | awk '{print $2}'); do
+            docker rmi "$img" 2>/dev/null && log_info "  Removed: $img" || true
+        done
+        log_info "Docker images removed."
+    else
+        log_warn "Cannot find compose file to determine images to remove."
+    fi
 else
     log_info "Docker images kept. Remove them later with: docker rmi <image-name>"
 fi
