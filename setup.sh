@@ -637,9 +637,9 @@ gather_config() {
     # Verify nvidia-container-toolkit is installed if NVIDIA is selected
     if [[ "${HW_ACCEL}" == "nvidia" ]]; then
         if ! command -v nvidia-container-runtime &>/dev/null && \
-           ! dpkg -l nvidia-container-toolkit &>/dev/null 2>&1 && \
-           ! rpm -q nvidia-container-toolkit &>/dev/null 2>&1 && \
-           ! pacman -Qi nvidia-container-toolkit &>/dev/null 2>&1; then
+           ! dpkg -l nvidia-container-toolkit &>/dev/null && \
+           ! rpm -q nvidia-container-toolkit &>/dev/null && \
+           ! pacman -Qi nvidia-container-toolkit &>/dev/null; then
             log_error "NVIDIA GPU detected but nvidia-container-toolkit is not installed."
             log_error "Docker cannot use NVIDIA GPUs without the container toolkit."
             echo ""
