@@ -215,7 +215,7 @@ check_dependencies() {
     fi
 
     # Ensure docker daemon is running (distinguish permission errors from daemon-down)
-    if ! docker info &>/dev/null 2>&1; then
+    if ! docker info &>/dev/null; then
         if systemctl is-active --quiet docker 2>/dev/null; then
             log_warn "Docker is running but current user lacks permission."
         else
@@ -226,7 +226,7 @@ check_dependencies() {
             local docker_wait=0
             local spin_chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
             while [[ $docker_wait -lt 15 ]]; do
-                if sudo docker info &>/dev/null 2>&1; then
+                if sudo docker info &>/dev/null; then
                     printf "\r  %-50s\r" ""
                     break
                 fi
@@ -236,7 +236,7 @@ check_dependencies() {
             done
             printf "\r  %-50s\r" ""
         fi
-        if ! sudo docker info &>/dev/null 2>&1; then
+        if ! sudo docker info &>/dev/null; then
             log_error "Failed to connect to Docker. Please start Docker manually and re-run."
             exit 1
         fi
@@ -1360,7 +1360,7 @@ case "${1:-help}" in
         fi
         ;;
     pull)
-        echo -e "${GREEN}Pulling latest images...${NC}"
+        echo -e "${GREEN}Pulling pinned images...${NC}"
         compose_cmd pull
         ;;
     update)
