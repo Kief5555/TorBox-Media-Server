@@ -67,7 +67,8 @@ services:
         max-size: "10m"
         max-file: "3"
     depends_on:
-      - byparr
+      byparr:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9696/ping"]
       interval: 30s
@@ -124,7 +125,8 @@ services:
         max-size: "10m"
         max-file: "3"
     depends_on:
-      - decypharr
+      decypharr:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:7878/ping"]
       interval: 30s
@@ -157,7 +159,8 @@ services:
         max-size: "10m"
         max-file: "3"
     depends_on:
-      - decypharr
+      decypharr:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8989/ping"]
       interval: 30s

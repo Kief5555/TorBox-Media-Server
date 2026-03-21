@@ -926,6 +926,9 @@ generate_docker_compose() {
     # Copy static compose file from repo to install directory
     cp "${SCRIPT_DIR}/docker-compose.yml" "${COMPOSE_FILE}"
 
+    # Ensure no ghost overrides remain from previous installations
+    rm -f "${INSTALL_DIR}/docker-compose.override.yml"
+
     # Generate hardware acceleration override (only if needed)
     if [[ "${HW_ACCEL}" == "intel" ]]; then
         cat > "${INSTALL_DIR}/docker-compose.override.yml" << 'HW_OVERRIDE'
@@ -1230,7 +1233,9 @@ case "${1:-help}" in
         # Restore files
         [[ -f "${target}/.env" ]] && cp -a "${target}/.env" "${ENV_FILE}" && echo "  Restored .env"
         [[ -f "${target}/docker-compose.yml" ]] && cp -a "${target}/docker-compose.yml" "${COMPOSE_FILE}" && echo "  Restored docker-compose.yml"
-        [[ -d "${target}/configs" ]] && cp -ra "${target}/configs" "${SCRIPT_DIR}/" && echo "  Restored configs/"
+        [[ -d "${target}/configs" ]] && cp -ra "${target}/configs" "${SCRIPT_DIR}/" && \
+            sudo chown -R "$(env_val PUID):$(env_val PGID)" "${SCRIPT_DIR}/configs" "${SCRIPT_DIR}/data" 2>/dev/null && \
+            echo "  Restored configs/"
         echo -e "${GREEN}Starting containers...${NC}"
         compose_cmd up -d --remove-orphans
         echo -e "${GREEN}Restore complete.${NC}"
