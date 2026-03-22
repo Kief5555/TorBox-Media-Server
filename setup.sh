@@ -911,6 +911,20 @@ DECYPHARR_USER="${DECYPHARR_USER:-torbox}"
 DECYPHARR_PASS="${DECYPHARR_PASS:-}"
 ENV_EOF
 
+    # Preserve existing admin credentials if this is a re-run
+    if [[ -n "${EXISTING_RADARR_ADMIN_USER:-}" ]]; then
+        cat >> "${ENV_FILE}" << ADMIN_EOF
+
+# Admin Credentials (Preserved)
+RADARR_ADMIN_USER="${EXISTING_RADARR_ADMIN_USER}"
+RADARR_ADMIN_PASS="${EXISTING_RADARR_ADMIN_PASS}"
+SONARR_ADMIN_USER="${EXISTING_SONARR_ADMIN_USER}"
+SONARR_ADMIN_PASS="${EXISTING_SONARR_ADMIN_PASS}"
+PROWLARR_ADMIN_USER="${EXISTING_PROWLARR_ADMIN_USER}"
+PROWLARR_ADMIN_PASS="${EXISTING_PROWLARR_ADMIN_PASS}"
+ADMIN_EOF
+    fi
+
     chmod 600 "${ENV_FILE}"
     log_info "Environment file written (profile: ${compose_profile})."
 }
@@ -2342,6 +2356,12 @@ EXISTING_RADARR_API_KEY=""
 EXISTING_SONARR_API_KEY=""
 EXISTING_PROWLARR_API_KEY=""
 EXISTING_TORBOX_API_KEY=""
+EXISTING_RADARR_ADMIN_USER=""
+EXISTING_RADARR_ADMIN_PASS=""
+EXISTING_SONARR_ADMIN_USER=""
+EXISTING_SONARR_ADMIN_PASS=""
+EXISTING_PROWLARR_ADMIN_USER=""
+EXISTING_PROWLARR_ADMIN_PASS=""
 
 check_existing_installation() {
     if [[ -f "${SETUP_COMPLETE_FILE}" ]]; then
@@ -2378,6 +2398,14 @@ check_existing_installation() {
         EXISTING_PROWLARR_API_KEY=$(grep '^PROWLARR_API_KEY=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
         EXISTING_TORBOX_API_KEY=$(grep '^TORBOX_API_KEY=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
         EXISTING_COMPOSE_PROFILES=$(grep '^COMPOSE_PROFILES=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+
+        # Extract existing admin credentials
+        EXISTING_RADARR_ADMIN_USER=$(grep '^RADARR_ADMIN_USER=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+        EXISTING_RADARR_ADMIN_PASS=$(grep '^RADARR_ADMIN_PASS=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+        EXISTING_SONARR_ADMIN_USER=$(grep '^SONARR_ADMIN_USER=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+        EXISTING_SONARR_ADMIN_PASS=$(grep '^SONARR_ADMIN_PASS=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+        EXISTING_PROWLARR_ADMIN_USER=$(grep '^PROWLARR_ADMIN_USER=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+        EXISTING_PROWLARR_ADMIN_PASS=$(grep '^PROWLARR_ADMIN_PASS=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
 
         # Validate extracted API keys are valid 32-char hex; regenerate if corrupted
         if [[ -n "$EXISTING_RADARR_API_KEY" && ! "$EXISTING_RADARR_API_KEY" =~ ^[0-9a-f]{32}$ ]]; then
