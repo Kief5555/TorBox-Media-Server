@@ -122,8 +122,10 @@ fi
 log_info "Cleaning up mount propagation..."
 MOUNT_DIR="$(env_val MOUNT_DIR)"
 if [[ -n "${MOUNT_DIR}" && -d "${MOUNT_DIR}" ]]; then
-    # Unmount any FUSE sub-mounts first (rclone may create nested mounts)
-    sudo umount -l "${MOUNT_DIR}"/** 2>/dev/null || true
+    # Unmount all nested mounts (deepest first) using findmnt
+    while read -r mount_point; do
+        sudo umount -l "$mount_point" 2>/dev/null || true
+    done < <(findmnt -rn -o TARGET "${MOUNT_DIR}" 2>/dev/null | sort -r)
     # Unmount the FUSE mount itself
     if mountpoint -q "${MOUNT_DIR}" 2>/dev/null; then
         sudo umount -l "${MOUNT_DIR}" 2>/dev/null || true

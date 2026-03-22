@@ -43,15 +43,7 @@ ENV_FILE="${INSTALL_DIR}/.env"
 COMPOSE_FILE="${INSTALL_DIR}/docker-compose.yml"
 SETUP_COMPLETE_FILE="${INSTALL_DIR}/.setup_complete"
 
-# Docker image versions (pinned for reproducibility)
-IMAGE_DECYPHARR="cy01/blackhole:1.6.3"
-IMAGE_PROWLARR="lscr.io/linuxserver/prowlarr:2.1.3"
-IMAGE_BYPARR="ghcr.io/thephaseless/byparr:1.2.2"
-IMAGE_RADARR="lscr.io/linuxserver/radarr:5.22.4"
-IMAGE_SONARR="lscr.io/linuxserver/sonarr:4.0.14"
-IMAGE_SEERR="ghcr.io/seerr-team/seerr:2.4.1"
-IMAGE_PLEX="lscr.io/linuxserver/plex:1.41.5"
-IMAGE_JELLYFIN="lscr.io/linuxserver/jellyfin:10.10.7"
+# Docker image versions are pinned directly in docker-compose.yml.
 
 # Generate deterministic-length API keys (32-char hex, matching *arr format)
 generate_api_key() {
@@ -1174,19 +1166,39 @@ case "${1:-help}" in
         echo -e "  ${BOLD}Radarr${NC}    $(env_val RADARR_API_KEY)"
         echo -e "  ${BOLD}Sonarr${NC}    $(env_val SONARR_API_KEY)"
         echo -e "  ${BOLD}Prowlarr${NC}  $(env_val PROWLARR_API_KEY)"
+        local _radarr_pass _sonarr_pass _prowlarr_pass
+        _radarr_pass="$(env_val RADARR_ADMIN_PASS)"
+        _sonarr_pass="$(env_val SONARR_ADMIN_PASS)"
+        _prowlarr_pass="$(env_val PROWLARR_ADMIN_PASS)"
+        if [[ -n "$_radarr_pass" ]]; then
+            echo ""
+            echo -e "  ${BOLD}Admin Credentials:${NC}"
+            echo -e "  ${BOLD}Radarr${NC}    user: $(env_val RADARR_ADMIN_USER)  pass: ${_radarr_pass}"
+            echo -e "  ${BOLD}Sonarr${NC}    user: $(env_val SONARR_ADMIN_USER)  pass: ${_sonarr_pass}"
+            echo -e "  ${BOLD}Prowlarr${NC}  user: $(env_val PROWLARR_ADMIN_USER)  pass: ${_prowlarr_pass}"
+        fi
         echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
         ;;
     enable)
-        echo -e "${GREEN}Enabling auto-start on boot...${NC}"
-        sudo systemctl enable torbox-media-server 2>/dev/null && \
-            echo -e "${GREEN}Auto-start enabled. Services will start automatically on boot.${NC}" || \
-            echo -e "${YELLOW}Systemd service not found. Re-run setup.sh to create it.${NC}"
+        if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
+            echo -e "${GREEN}Enabling auto-start on boot...${NC}"
+            sudo systemctl enable torbox-media-server 2>/dev/null && \
+                echo -e "${GREEN}Auto-start enabled. Services will start automatically on boot.${NC}" || \
+                echo -e "${YELLOW}Failed to enable systemd service.${NC}"
+        else
+            echo -e "${YELLOW}systemd not available on this system.${NC}"
+            echo "  Use './manage.sh start' to start services manually."
+        fi
         ;;
     disable)
-        echo -e "${YELLOW}Disabling auto-start on boot...${NC}"
-        sudo systemctl disable torbox-media-server 2>/dev/null && \
-            echo -e "${YELLOW}Auto-start disabled. Use './manage.sh start' to start services manually.${NC}" || \
-            echo -e "${YELLOW}Systemd service not found.${NC}"
+        if command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]; then
+            echo -e "${YELLOW}Disabling auto-start on boot...${NC}"
+            sudo systemctl disable torbox-media-server 2>/dev/null && \
+                echo -e "${YELLOW}Auto-start disabled. Use './manage.sh start' to start services manually.${NC}" || \
+                echo -e "${YELLOW}Systemd service not found.${NC}"
+        else
+            echo -e "${YELLOW}systemd not available on this system.${NC}"
+        fi
         ;;
     backup)
         backup_dir="${SCRIPT_DIR}/backups/$(date +%Y%m%d_%H%M%S)"
@@ -2006,23 +2018,55 @@ configure_arr_auth() {
         return 0
     fi
 
-    # Set auth to Forms (login page) for local addresses
+    # Generate admin credentials
+    local admin_user="admin"
+    local admin_pass
+    admin_pass="$(openssl rand -base64 12 2>/dev/null | tr -d '/+=' | head -c 12)"
+    if [[ -z "$admin_pass" ]]; then
+        admin_pass="$(head -c 12 /dev/urandom | base64 | tr -d '/+=' | head -c 12)"
+    fi
+
+    # Store credentials globally for post-install display
+    case "$name" in
+        Radarr)   RADARR_ADMIN_USER="$admin_user"; RADARR_ADMIN_PASS="$admin_pass" ;;
+        Sonarr)   SONARR_ADMIN_USER="$admin_user"; SONARR_ADMIN_PASS="$admin_pass" ;;
+        Prowlarr) PROWLARR_ADMIN_USER="$admin_user"; PROWLARR_ADMIN_PASS="$admin_pass" ;;
+    esac
+
+    # Set auth to Forms with Enabled (always require login)
     local auth_id
     auth_id=$(echo "$auth_config" | jq -r '.id' 2>/dev/null) || true
     [[ -z "$auth_id" || "$auth_id" == "null" ]] && { log_warn "  Could not parse ${name} auth config ID."; return 1; }
 
-    # Update auth config to Forms with DisabledForLocalAddresses
     local updated_auth
-    updated_auth=$(echo "$auth_config" | jq '.authenticationMethod = "Forms" | .authenticationRequired = "DisabledForLocalAddresses"' 2>/dev/null) || true
+    updated_auth=$(echo "$auth_config" | jq \
+        --arg user "$admin_user" \
+        --arg pass "$admin_pass" \
+        '.authenticationMethod = "Forms" | .authenticationRequired = "Enabled" | .username = $user | .password = $pass' 2>/dev/null) || true
     [[ -z "$updated_auth" ]] && { log_warn "  Could not update ${name} auth config."; return 1; }
 
     curl -sf --connect-timeout 5 --max-time 15 -X PUT \
         -H "Content-Type: application/json" \
         -H "X-Api-Key: ${api_key}" \
         "${url}/api/v3/config/host/${auth_id}" \
-        -d "$updated_auth" -o /dev/null 2>/dev/null && \
-        log_info "  ${name} auth set to Forms (DisabledForLocalAddresses)." \
-        || log_warn "  Failed to configure ${name} auth."
+        -d "$updated_auth" -o /dev/null 2>/dev/null && {
+        log_info "  ${name} auth set to Forms (Enabled) with auto-generated credentials."
+        # Persist credentials to .env for manage.sh to display
+        if [[ -f "${ENV_FILE}" ]]; then
+            local env_key
+            case "$name" in
+                Radarr)   env_key="RADARR_ADMIN" ;;
+                Sonarr)   env_key="SONARR_ADMIN" ;;
+                Prowlarr) env_key="PROWLARR_ADMIN" ;;
+            esac
+            # Remove old entries and append new ones
+            grep -v "^${env_key}_USER=\|^${env_key}_PASS=" "${ENV_FILE}" > "${ENV_FILE}.tmp" 2>/dev/null || true
+            echo "${env_key}_USER=\"${admin_user}\"" >> "${ENV_FILE}.tmp"
+            echo "${env_key}_PASS=\"${admin_pass}\"" >> "${ENV_FILE}.tmp"
+            mv "${ENV_FILE}.tmp" "${ENV_FILE}"
+            chmod 600 "${ENV_FILE}"
+        fi
+    } || log_warn "  Failed to configure ${name} auth."
 }
 
 # ============================================================================
@@ -2047,6 +2091,17 @@ print_post_install() {
     echo -e "  ${BOLD}Prowlarr${NC}  $(mask_key "${PROWLARR_API_KEY}")"
     echo -e "  ${YELLOW}View full keys with:${NC} cd ${INSTALL_DIR} && ./manage.sh keys"
     echo ""
+
+    if [[ "$SERVICES_STARTED" == "true" && -n "${RADARR_ADMIN_PASS:-}" ]]; then
+        echo -e "${BOLD}━━━━ Auto-Generated Admin Credentials ━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo -e "  ${YELLOW}Save these credentials — you will need them to log in.${NC}"
+        echo ""
+        echo -e "  ${BOLD}Radarr${NC}    Username: ${RADARR_ADMIN_USER}  Password: ${RADARR_ADMIN_PASS}"
+        echo -e "  ${BOLD}Sonarr${NC}    Username: ${SONARR_ADMIN_USER}  Password: ${SONARR_ADMIN_PASS}"
+        echo -e "  ${BOLD}Prowlarr${NC}  Username: ${PROWLARR_ADMIN_USER}  Password: ${PROWLARR_ADMIN_PASS}"
+        echo ""
+    fi
 
     if [[ "$SERVICES_STARTED" == "true" ]]; then
         echo -e "${BOLD}━━━━ Auto-Configured (already done for you) ━━━━━━━━━━━━━━━${NC}"
@@ -2107,7 +2162,13 @@ print_post_install() {
     echo ""
     echo -e "${CYAN}2. Prowlarr${NC}"
     echo "   • Open http://localhost:9696"
-    echo -e "   • ${YELLOW}Create login credentials (Settings → General → Authentication)${NC}"
+    if [[ "$SERVICES_STARTED" == "true" && -n "${PROWLARR_ADMIN_PASS:-}" ]]; then
+        echo -e "   • ${GREEN}Credentials pre-seeded ✓${NC}"
+        echo -e "   •   Username: ${BOLD}${PROWLARR_ADMIN_USER}${NC}"
+        echo -e "   •   Password: ${BOLD}${PROWLARR_ADMIN_PASS}${NC}"
+    else
+        echo -e "   • ${YELLOW}Create login credentials (Settings → General → Authentication)${NC}"
+    fi
     if [[ "$SERVICES_STARTED" == "true" ]]; then
         echo -e "   • ${GREEN}Byparr proxy already configured ✓${NC}"
         echo -e "   • ${GREEN}Radarr & Sonarr apps already connected ✓${NC}"
@@ -2118,7 +2179,13 @@ print_post_install() {
     echo ""
     echo -e "${CYAN}3. Radarr${NC}"
     echo "   • Open http://localhost:7878"
-    echo -e "   • ${YELLOW}Set up authentication (Settings → General → Authentication)${NC}"
+    if [[ "$SERVICES_STARTED" == "true" && -n "${RADARR_ADMIN_PASS:-}" ]]; then
+        echo -e "   • ${GREEN}Credentials pre-seeded ✓${NC}"
+        echo -e "   •   Username: ${BOLD}${RADARR_ADMIN_USER}${NC}"
+        echo -e "   •   Password: ${BOLD}${RADARR_ADMIN_PASS}${NC}"
+    else
+        echo -e "   • ${YELLOW}Set up authentication (Settings → General → Authentication)${NC}"
+    fi
     if [[ "$SERVICES_STARTED" == "true" ]]; then
         echo -e "   • ${GREEN}Download client (Decypharr) already configured ✓${NC}"
         echo -e "   • ${GREEN}Root folder (/data/media/movies) already configured ✓${NC}"
@@ -2137,7 +2204,13 @@ print_post_install() {
     echo ""
     echo -e "${CYAN}4. Sonarr${NC}"
     echo "   • Open http://localhost:8989"
-    echo -e "   • ${YELLOW}Set up authentication (Settings → General → Authentication)${NC}"
+    if [[ "$SERVICES_STARTED" == "true" && -n "${SONARR_ADMIN_PASS:-}" ]]; then
+        echo -e "   • ${GREEN}Credentials pre-seeded ✓${NC}"
+        echo -e "   •   Username: ${BOLD}${SONARR_ADMIN_USER}${NC}"
+        echo -e "   •   Password: ${BOLD}${SONARR_ADMIN_PASS}${NC}"
+    else
+        echo -e "   • ${YELLOW}Set up authentication (Settings → General → Authentication)${NC}"
+    fi
     if [[ "$SERVICES_STARTED" == "true" ]]; then
         echo -e "   • ${GREEN}Download client (Decypharr) already configured ✓${NC}"
         echo -e "   • ${GREEN}Root folder (/data/media/tv) already configured ✓${NC}"
@@ -2208,12 +2281,16 @@ print_post_install() {
 
     echo -e "${BOLD}━━━━ Important Notes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo -e "  ${YELLOW}⚠  Authentication is disabled for local addresses by default.${NC}"
-    echo "     This allows API auto-configuration to work on first launch."
-    echo "     Set up credentials in each service's Settings → General → Authentication."
-    echo ""
-    echo -e "  ${RED}⚠  SECURITY: You MUST enable authentication on all services before exposing${NC}"
-    echo -e "  ${RED}     them to your LAN. Any local user can currently access them without credentials.${NC}"
+    if [[ "$SERVICES_STARTED" == "true" && -n "${RADARR_ADMIN_PASS:-}" ]]; then
+        echo -e "  ${GREEN}✓  Authentication is enabled on all services.${NC}"
+        echo "     Auto-generated credentials were printed above. Change them in each service's"
+        echo "     Settings → General → Security after first login."
+        echo ""
+    else
+        echo -e "  ${RED}⚠  Authentication is NOT yet configured on Radarr/Sonarr/Prowlarr.${NC}"
+        echo "     Set up credentials in each service's Settings → General → Authentication."
+        echo ""
+    fi
     echo ""
     echo -e "  ${GREEN}✓  Auto-start on boot is enabled.${NC}"
     echo "     A systemd service (torbox-media-server) handles mount propagation"
