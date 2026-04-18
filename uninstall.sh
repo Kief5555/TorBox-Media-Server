@@ -33,7 +33,8 @@ log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 # Safely read a value from .env without executing shell code
 env_val() {
     local key="$1"
-    grep "^${key}=" "${ENV_FILE}" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'"
+    # Use grep and cut to avoid sourcing the file; strip quotes and carriage returns
+    grep "^${key}=" "${ENV_FILE}" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'\' | tr -d '\r'
 }
 
 # Detect the correct docker compose command
@@ -103,7 +104,7 @@ else
 fi
 
 # Remove the Docker network (dynamically computed from project directory name)
-project_name="$(basename "${SCRIPT_DIR}")"
+project_name="$(basename "${INSTALL_DIR}")"
 docker network rm "${project_name}_media-network" 2>/dev/null || true
 
 # Step 2: Remove systemd service
