@@ -40,9 +40,10 @@ jobs:
       - name: Extract and validate manage.sh
         run: |
           # Extract the heredoc content that generates manage.sh from setup.sh
-          sed -n '/^cat > "${INSTALL_DIR}\/manage.sh" << .MANAGE_EOF.$/,/^MANAGE_EOF$/p' setup.sh > /tmp/manage_extracted.sh
-          # Also extract the inline heredoc block
-          sed -n '/^cat >> "${INSTALL_DIR}\/manage.sh" << .MANAGE_INLINE.$/,/^MANAGE_INLINE$/p' setup.sh >> /tmp/manage_extracted.sh
+          # Strip the first and last lines of each heredoc block (cat/EOF wrappers)
+          # so bash -n checks the actual script content, not the heredoc container.
+          sed -n '/^cat > "${INSTALL_DIR}\/manage.sh" << .MANAGE_EOF.$/,/^MANAGE_EOF$/p' setup.sh | sed '1d;$d' > /tmp/manage_extracted.sh
+          sed -n '/^cat >> "${INSTALL_DIR}\/manage.sh" << .MANAGE_INLINE.$/,/^MANAGE_INLINE$/p' setup.sh | sed '1d;$d' >> /tmp/manage_extracted.sh
           bash -n /tmp/manage_extracted.sh && echo "manage.sh syntax OK" || echo "manage.sh has syntax errors"
 
       - name: Validate uninstall.sh syntax

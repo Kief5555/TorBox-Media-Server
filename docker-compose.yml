@@ -13,7 +13,7 @@ services:
   # Mocks qBittorrent API for Radarr/Sonarr, connects to TorBox,
   # handles WebDAV mounting via built-in rclone, and creates symlinks.
   decypharr:
-    image: cy01/blackhole:1.6.3
+    image: ghcr.io/sirrobot01/decypharr:v2.0
     container_name: decypharr
     restart: unless-stopped
     networks:
@@ -195,7 +195,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 60s
     volumes:
       - "${CONFIG_DIR}/seerr:/app/config"
 
@@ -245,7 +245,7 @@ services:
       - media-network
     ports:
       - "8096:8096"
-      - "127.0.0.1:8920:8920"
+      - "8920:8920"
     environment:
       - PUID=${PUID}
       - PGID=${PGID}

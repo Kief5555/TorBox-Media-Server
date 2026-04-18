@@ -277,7 +277,7 @@ Decypharr is the critical bridge between your media managers and TorBox. **Nothi
    - **Debrid** tab: TorBox API key should be shown ✓, Rclone Folder set to `/mnt/remote/torbox/__all__` ✓, WebDAV enabled ✓
    - **Rclone** tab: Mount should be **enabled** ✓, mount path `/mnt/remote` ✓
    - All of the above are pre-configured by the setup script — just verify they look correct
-4. Click **Save** if you made any changes
+4. ⚠️ **Do not click Save** — Decypharr's config is mounted read-only (`:ro`) as a security measure. If you need to change settings, edit the config file on the host (`torbox-media-server/configs/decypharr/config.json`) and restart the container, or re-run `setup.sh`.
 
 **✅ What success looks like:** The Debrid tab shows your API key, WebDAV is enabled, and the Rclone tab shows the mount as active.
 

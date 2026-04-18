@@ -197,6 +197,10 @@ check_dependencies() {
         missing+=("openssl")
     fi
 
+    if ! command -v timedatectl &>/dev/null; then
+        missing+=("timedatectl")
+    fi
+
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_warn "Missing dependencies: ${missing[*]}"
         echo ""
@@ -339,6 +343,9 @@ install_dependencies() {
                 openssl)
                     sudo pacman -S --noconfirm openssl
                     ;;
+                timedatectl)
+                    sudo pacman -S --noconfirm systemd
+                    ;;
             esac
         done
     elif command -v apt-get &>/dev/null; then
@@ -362,6 +369,9 @@ install_dependencies() {
                 openssl)
                     sudo apt-get install -y openssl
                     ;;
+                timedatectl)
+                    sudo apt-get install -y systemd
+                    ;;
             esac
         done
     elif command -v dnf &>/dev/null; then
@@ -383,6 +393,9 @@ install_dependencies() {
                     ;;
                 openssl)
                     sudo dnf install -y openssl
+                    ;;
+                timedatectl)
+                    sudo dnf install -y systemd-udev
                     ;;
             esac
         done
@@ -2065,14 +2078,14 @@ configure_arr_auth() {
         "${url}/api/v3/config/host/${auth_id}" \
         -d "$updated_auth" -o /dev/null 2>/dev/null && {
         log_info "  ${name} auth set to Forms (Enabled) with auto-generated credentials."
-        # Persist credentials to .env for manage.sh to display
-        if [[ -f "${ENV_FILE}" ]]; then
-            local env_key
-            case "$name" in
-                Radarr)   env_key="RADARR_ADMIN" ;;
-                Sonarr)   env_key="SONARR_ADMIN" ;;
-                Prowlarr) env_key="PROWLARR_ADMIN" ;;
-            esac
+        local env_key
+        case "$name" in
+            Radarr)   env_key="RADARR_ADMIN_USER" ;;
+            Sonarr)   env_key="SONARR_ADMIN_USER" ;;
+            Prowlarr) env_key="PROWLARR_ADMIN_USER" ;;
+
+        esac
+
             # Remove old entries and append new ones
             grep -v "^${env_key}_USER=\|^${env_key}_PASS=" "${ENV_FILE}" > "${ENV_FILE}.tmp" 2>/dev/null || true
             echo "${env_key}_USER=\"${admin_user}\"" >> "${ENV_FILE}.tmp"
@@ -2471,7 +2484,7 @@ start_services() {
 NON_INTERACTIVE=false
 
 main() {
-    # Parse command-line flags
+    # Parse command-line flags (moved to the very beginning)
     for arg in "$@"; do
         case "$arg" in
             -y|--yes|--non-interactive) NON_INTERACTIVE=true ;;
