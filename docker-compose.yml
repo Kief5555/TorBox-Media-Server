@@ -19,14 +19,14 @@ services:
     networks:
       - media-network
     ports:
-      - "127.0.0.1:8282:8282"
+      - "8282:8282"
     environment:
       - PUID=${PUID}
       - PGID=${PGID}
       - UMASK=002
     volumes:
-      - "${CONFIG_DIR}/decypharr/config.json:/app/config.json:ro"
-      - "${MOUNT_DIR}:/mnt/remote:rshared"
+      - "${CONFIG_DIR}/decypharr:/app"
+      - "/mnt:/mnt:rshared"
       - "${DATA_DIR}:/data"
     devices:
       - /dev/fuse:/dev/fuse:rwm
