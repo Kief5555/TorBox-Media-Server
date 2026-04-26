@@ -2103,8 +2103,7 @@ configure_arr_auth() {
                 rm -f "${env_tmp}"
             fi
             chmod 600 "${ENV_FILE}"
-        }
-    } || log_warn "  Failed to configure ${name} auth."
+        } || log_warn "  Failed to configure ${name} auth."
 }
 
 # ============================================================================
