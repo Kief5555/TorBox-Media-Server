@@ -334,19 +334,19 @@ test_image_versions_not_latest() {
 }
 
 # ============================================================================
-#  Function: docker-compose volume mounts (Decypharr read-only)
+#  Function: docker-compose volume mounts (Decypharr writable config)
 # ============================================================================
 
-test_decypharr_config_mount_readonly() {
+test_decypharr_config_mount_writable() {
     local compose_file="${SCRIPT_DIR}/../docker-compose.yml"
     if [[ ! -f "$compose_file" ]]; then
         echo -e "${CYAN}[SKIP]${NC} Cannot find docker-compose.yml to check Decypharr mount"
         return
     fi
-    if grep -q 'config.json:/app/config.json:ro' "$compose_file"; then
-        pass "Decypharr config.json is mounted as read-only file"
+    if grep -q '"${CONFIG_DIR}/decypharr:/app"' "$compose_file"; then
+        pass "Decypharr config directory is mounted writable"
     else
-        fail "Decypharr config should use file-level :ro mount"
+        fail "Decypharr config directory should be mounted writable at /app"
     fi
 }
 
@@ -401,7 +401,7 @@ test_hex_key_validation_with_letters
 echo ""
 echo "--- Docker compose template tests ---"
 test_image_versions_not_latest
-test_decypharr_config_mount_readonly
+test_decypharr_config_mount_writable
 
 echo ""
 echo "--- Feature detection tests ---"

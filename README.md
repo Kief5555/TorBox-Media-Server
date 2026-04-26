@@ -277,7 +277,7 @@ Decypharr is the critical bridge between your media managers and TorBox. **Nothi
    - **Debrid** tab: TorBox API key should be shown ✓, Rclone Folder set to `/mnt/remote/torbox/__all__` ✓, WebDAV enabled ✓
    - **Rclone** tab: Mount should be **enabled** ✓, mount path `/mnt/remote` ✓
    - All of the above are pre-configured by the setup script — just verify they look correct
-4. ⚠️ **Do not click Save** — Decypharr's config is mounted read-only (`:ro`) as a security measure. If you need to change settings, edit the config file on the host (`torbox-media-server/configs/decypharr/config.json`) and restart the container, or re-run `setup.sh`.
+4. You can click **Save** if you change Decypharr settings. Its config directory is mounted persistently so the app can update `config.json` without entering a restart loop.
 
 **✅ What success looks like:** The Debrid tab shows your API key, WebDAV is enabled, and the Rclone tab shows the mount as active.
 
@@ -523,7 +523,7 @@ For remote access outside your home network, use a reverse proxy like [Caddy](ht
 - **Authentication is set to `Forms` with `DisabledForLocalAddresses`** after setup — **you must create login credentials** in each service's Settings → General before exposing them to your LAN (see Steps 2–4 in the walkthrough above)
 - **The `.env` file** contains your TorBox API key and *arr API keys — it's `chmod 600` (owner-read only). Don't commit it to version control
 - **Only Decypharr** gets `SYS_ADMIN` capability and FUSE access — other containers only read files via symlinks
-- **Decypharr config is mounted read-only** — the config directory is bound as `:ro` to prevent containers from modifying their own configuration
+- **Decypharr config is mounted writable** — Decypharr needs to update its own `config.json` at runtime, so the config directory is persisted on the host instead of mounted read-only
 
 ## Troubleshooting
 
@@ -652,7 +652,7 @@ This usually means Radarr or Sonarr hasn't finished starting yet. Wait a minute 
 - **jq for JSON manipulation** — used to modify *arr config via API; auto-installed as a dependency
 - **Quality profile upgrades enabled** — without this, Radarr/Sonarr won't replace a 720p version with a 1080p one; most users want automatic upgrades
 - **Docker images pinned to specific versions** — avoids breakage from upstream changes; re-run `setup.sh` to pick up newer versions intentionally
-- **Decypharr config mounted read-only** — config.json is bind-mounted as `:ro` to prevent containers from accidentally modifying it
+- **Decypharr config mounted writable** — Decypharr rewrites its config at runtime, so the host config directory is mounted at `/app` and persisted across restarts
 - **Decypharr credentials pre-seeded** — generated during setup and injected into config.json, eliminating manual credential creation
 - **Plex and Jellyfin on all interfaces** — both media servers expose their ports on all interfaces for LAN streaming consistency; other services remain localhost-only for security
 
