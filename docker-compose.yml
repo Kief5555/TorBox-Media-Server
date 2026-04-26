@@ -25,7 +25,7 @@ services:
       - PGID=${PGID}
       - UMASK=002
     volumes:
-      - "${CONFIG_DIR}/decypharr:/app"
+      - "${CONFIG_DIR}/decypharr/config.json:/app/config.json:ro"
       - "/mnt:/mnt:rshared"
       - "${DATA_DIR}:/data"
     devices:

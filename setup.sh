@@ -101,14 +101,20 @@ mask_key()    { local k="$1"; if [[ ${#k} -gt 4 ]]; then echo "${k:0:4}...${k: -
 
 # Service port registry (single source of truth for all port/label references)
 SVC_ORDER=(decypharr prowlarr byparr radarr sonarr seerr)
-declare -A SVC_PORTS=(
-    [decypharr]=8282 [prowlarr]=9696 [byparr]=8191
-    [radarr]=7878 [sonarr]=8989 [seerr]=5055
-)
-declare -A SVC_LABELS=(
-    [decypharr]="Decypharr" [prowlarr]="Prowlarr" [byparr]="Byparr"
-    [radarr]="Radarr" [sonarr]="Sonarr" [seerr]="Seerr"
-)
+declare -A SVC_PORTS
+SVC_PORTS["decypharr"]=8282
+SVC_PORTS["prowlarr"]=9696
+SVC_PORTS["byparr"]=8191
+SVC_PORTS["radarr"]=7878
+SVC_PORTS["sonarr"]=8989
+SVC_PORTS["seerr"]=5055
+declare -A SVC_LABELS
+SVC_LABELS["decypharr"]="Decypharr"
+SVC_LABELS["prowlarr"]="Prowlarr"
+SVC_LABELS["byparr"]="Byparr"
+SVC_LABELS["radarr"]="Radarr"
+SVC_LABELS["sonarr"]="Sonarr"
+SVC_LABELS["seerr"]="Seerr"
 
 print_service_urls() {
     local svc
@@ -942,7 +948,7 @@ JELLYFIN_IMAGE="${jellyfin_image}"
 ENV_EOF
 
     # Preserve existing admin credentials if this is a re-run
-    if [[ -n "${EXISTING_RADARR_ADMIN_USER:-}" ]]; then
+    if [[ -n "${EXISTING_RADARR_ADMIN_USER:-}" || -n "${EXISTING_SONARR_ADMIN_USER:-}" || -n "${EXISTING_PROWLARR_ADMIN_USER:-}" ]]; then
         cat >> "${ENV_FILE}" << ADMIN_EOF
 
 # Admin Credentials (Preserved)
@@ -1057,14 +1063,20 @@ NC='\033[0m'
 
 # Service port registry
 SVC_ORDER=(decypharr prowlarr byparr radarr sonarr seerr)
-declare -A SVC_PORTS=(
-    [decypharr]=8282 [prowlarr]=9696 [byparr]=8191
-    [radarr]=7878 [sonarr]=8989 [seerr]=5055
-)
-declare -A SVC_LABELS=(
-    [decypharr]="Decypharr" [prowlarr]="Prowlarr" [byparr]="Byparr"
-    [radarr]="Radarr" [sonarr]="Sonarr" [seerr]="Seerr"
-)
+declare -A SVC_PORTS
+SVC_PORTS["decypharr"]=8282
+SVC_PORTS["prowlarr"]=9696
+SVC_PORTS["byparr"]=8191
+SVC_PORTS["radarr"]=7878
+SVC_PORTS["sonarr"]=8989
+SVC_PORTS["seerr"]=5055
+declare -A SVC_LABELS
+SVC_LABELS["decypharr"]="Decypharr"
+SVC_LABELS["prowlarr"]="Prowlarr"
+SVC_LABELS["byparr"]="Byparr"
+SVC_LABELS["radarr"]="Radarr"
+SVC_LABELS["sonarr"]="Sonarr"
+SVC_LABELS["seerr"]="Seerr"
 
 # Safely read a value from .env without executing shell code
 env_val() {
@@ -2052,12 +2064,14 @@ add_default_indexer() {
 
 configure_arr_auth() {
     local name="$1" url="$2" api_key="$3"
+    local api_ver="v3"
+    [[ "$name" == "Prowlarr" ]] && api_ver="v1"
 
     log_step "Configuring ${name} authentication..."
 
     # Check current auth config
     local auth_config
-    auth_config=$(curl -sf --connect-timeout 5 --max-time 15 -H "X-Api-Key: ${api_key}" "${url}/api/v3/config/host" 2>/dev/null) || true
+    auth_config=$(curl -sf --connect-timeout 5 --max-time 15 -H "X-Api-Key: ${api_key}" "${url}/api/${api_ver}/config/host" 2>/dev/null) || true
     [[ -z "$auth_config" ]] && { log_warn "  Could not retrieve ${name} auth config."; return 1; }
 
     # Check if auth is already set to Forms
@@ -2075,13 +2089,6 @@ configure_arr_auth() {
         admin_pass="$(head -c 12 /dev/urandom | base64 | tr -d '/+=' | head -c 12)"
     fi
 
-    # Store credentials globally for post-install display
-    case "$name" in
-        Radarr)   RADARR_ADMIN_USER="$admin_user"; RADARR_ADMIN_PASS="$admin_pass" ;;
-        Sonarr)   SONARR_ADMIN_USER="$admin_user"; SONARR_ADMIN_PASS="$admin_pass" ;;
-        Prowlarr) PROWLARR_ADMIN_USER="$admin_user"; PROWLARR_ADMIN_PASS="$admin_pass" ;;
-    esac
-
     # Set auth to Forms with Enabled (always require login)
     local auth_id
     auth_id=$(echo "$auth_config" | jq -r '.id' 2>/dev/null) || true
@@ -2097,23 +2104,23 @@ configure_arr_auth() {
     curl -sf --connect-timeout 5 --max-time 15 -X PUT \
         -H "Content-Type: application/json" \
         -H "X-Api-Key: ${api_key}" \
-        "${url}/api/v3/config/host/${auth_id}" \
+        "${url}/api/${api_ver}/config/host/${auth_id}" \
         -d "$updated_auth" -o /dev/null 2>/dev/null && {
             log_info "  ${name} auth set to Forms (Enabled) with auto-generated credentials."
-            local env_key
+            local env_prefix
             case "$name" in
-                Radarr)   env_key="RADARR_ADMIN_USER" ;;
-                Sonarr)   env_key="SONARR_ADMIN_USER" ;;
-                Prowlarr) env_key="PROWLARR_ADMIN_USER" ;;
+                Radarr)   env_prefix="RADARR_ADMIN"; RADARR_ADMIN_USER="$admin_user"; RADARR_ADMIN_PASS="$admin_pass" ;;
+                Sonarr)   env_prefix="SONARR_ADMIN"; SONARR_ADMIN_USER="$admin_user"; SONARR_ADMIN_PASS="$admin_pass" ;;
+                Prowlarr) env_prefix="PROWLARR_ADMIN"; PROWLARR_ADMIN_USER="$admin_user"; PROWLARR_ADMIN_PASS="$admin_pass" ;;
                 *)        { log_warn "  Unsupported service name: ${name}"; return 1; } ;;
             esac
 
             # Remove old entries and append new ones
             local env_tmp
             env_tmp="$(mktemp "${ENV_FILE}.tmp.XXXXXX")"
-            if grep -v "^${env_key}_USER=\\|^${env_key}_PASS=" "${ENV_FILE}" > "${env_tmp}" 2>/dev/null; then
-                echo "${env_key}_USER=\"${admin_user}\"" >> "${env_tmp}"
-                echo "${env_key}_PASS=\"${admin_pass}\"" >> "${env_tmp}"
+            if grep -v "^${env_prefix}_USER=\\|^${env_prefix}_PASS=" "${ENV_FILE}" > "${env_tmp}" 2>/dev/null; then
+                echo "${env_prefix}_USER=\"${admin_user}\"" >> "${env_tmp}"
+                echo "${env_prefix}_PASS=\"${admin_pass}\"" >> "${env_tmp}"
                 mv "${env_tmp}" "${ENV_FILE}"
             else
                 rm -f "${env_tmp}"
@@ -2217,8 +2224,8 @@ print_post_install() {
     echo "   • Open http://localhost:9696"
     if [[ "$SERVICES_STARTED" == "true" && -n "${PROWLARR_ADMIN_PASS:-}" ]]; then
         echo -e "   • ${GREEN}Credentials pre-seeded ✓${NC}"
-        echo -e "   •   Username: ${BOLD}${PROWLARR_ADMIN_USER}${NC}"
-        echo -e "   •   Password: ${BOLD}${PROWLARR_ADMIN_PASS}${NC}"
+        echo -e "   •   Username: ${BOLD}${PROWLARR_ADMIN_USER:-<not set>}${NC}"
+        echo -e "   •   Password: ${BOLD}${PROWLARR_ADMIN_PASS:-<not set>}${NC}"
     else
         echo -e "   • ${YELLOW}Create login credentials (Settings → General → Authentication)${NC}"
     fi
@@ -2234,8 +2241,8 @@ print_post_install() {
     echo "   • Open http://localhost:7878"
     if [[ "$SERVICES_STARTED" == "true" && -n "${RADARR_ADMIN_PASS:-}" ]]; then
         echo -e "   • ${GREEN}Credentials pre-seeded ✓${NC}"
-        echo -e "   •   Username: ${BOLD}${RADARR_ADMIN_USER}${NC}"
-        echo -e "   •   Password: ${BOLD}${RADARR_ADMIN_PASS}${NC}"
+        echo -e "   •   Username: ${BOLD}${RADARR_ADMIN_USER:-<not set>}${NC}"
+        echo -e "   •   Password: ${BOLD}${RADARR_ADMIN_PASS:-<not set>}${NC}"
     else
         echo -e "   • ${YELLOW}Set up authentication (Settings → General → Authentication)${NC}"
     fi
@@ -2259,8 +2266,8 @@ print_post_install() {
     echo "   • Open http://localhost:8989"
     if [[ "$SERVICES_STARTED" == "true" && -n "${SONARR_ADMIN_PASS:-}" ]]; then
         echo -e "   • ${GREEN}Credentials pre-seeded ✓${NC}"
-        echo -e "   •   Username: ${BOLD}${SONARR_ADMIN_USER}${NC}"
-        echo -e "   •   Password: ${BOLD}${SONARR_ADMIN_PASS}${NC}"
+        echo -e "   •   Username: ${BOLD}${SONARR_ADMIN_USER:-<not set>}${NC}"
+        echo -e "   •   Password: ${BOLD}${SONARR_ADMIN_PASS:-<not set>}${NC}"
     else
         echo -e "   • ${YELLOW}Set up authentication (Settings → General → Authentication)${NC}"
     fi
@@ -2389,6 +2396,12 @@ print_post_install() {
 # ============================================================================
 
 SERVICES_STARTED=false
+RADARR_ADMIN_USER=""
+RADARR_ADMIN_PASS=""
+SONARR_ADMIN_USER=""
+SONARR_ADMIN_PASS=""
+PROWLARR_ADMIN_USER=""
+PROWLARR_ADMIN_PASS=""
 
 # Globals for re-run detection (set by check_existing_installation)
 EXISTING_RADARR_API_KEY=""
@@ -2411,7 +2424,7 @@ EXISTING_PLEX_IMAGE=""
 EXISTING_JELLYFIN_IMAGE=""
 
 check_existing_installation() {
-    if [[ -f "${SETUP_COMPLETE_FILE}" ]]; then
+    if [[ -f "${SETUP_COMPLETE_FILE}" || -f "${ENV_FILE}" || -f "${COMPOSE_FILE}" ]]; then
         log_section "Existing Installation Detected"
         log_warn "A previous installation was found at: ${INSTALL_DIR}"
         echo ""
@@ -2484,6 +2497,12 @@ check_existing_installation() {
         EXISTING_SONARR_ADMIN_PASS=$(grep '^SONARR_ADMIN_PASS=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
         EXISTING_PROWLARR_ADMIN_USER=$(grep '^PROWLARR_ADMIN_USER=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
         EXISTING_PROWLARR_ADMIN_PASS=$(grep '^PROWLARR_ADMIN_PASS=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+        RADARR_ADMIN_USER="${EXISTING_RADARR_ADMIN_USER}"
+        RADARR_ADMIN_PASS="${EXISTING_RADARR_ADMIN_PASS}"
+        SONARR_ADMIN_USER="${EXISTING_SONARR_ADMIN_USER}"
+        SONARR_ADMIN_PASS="${EXISTING_SONARR_ADMIN_PASS}"
+        PROWLARR_ADMIN_USER="${EXISTING_PROWLARR_ADMIN_USER}"
+        PROWLARR_ADMIN_PASS="${EXISTING_PROWLARR_ADMIN_PASS}"
 
         # Validate extracted API keys are valid 32-char hex; regenerate if corrupted
         if [[ -n "$EXISTING_RADARR_API_KEY" && ! "$EXISTING_RADARR_API_KEY" =~ ^[0-9a-f]{32}$ ]]; then
