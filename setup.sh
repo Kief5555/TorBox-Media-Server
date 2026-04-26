@@ -327,12 +327,12 @@ install_dependencies() {
         for dep in "${deps[@]}"; do
             case "$dep" in
                 docker)
-                    sudo pacman -S --noconfirm docker docker-compose-plugin
+                    sudo pacman -S --noconfirm docker docker-compose
                     sudo systemctl enable --now docker
                     sudo usermod -aG docker "$USER"
                     ;;
                 docker-compose)
-                    sudo pacman -S --noconfirm docker-compose-plugin
+                    sudo pacman -S --noconfirm docker-compose
                     ;;
                 curl)
                     sudo pacman -S --noconfirm curl
