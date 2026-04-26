@@ -883,7 +883,14 @@ PROWLARR_XML_EOF
 generate_env_file() {
     log_step "Generating environment file..."
 
-    local decypharr_image="${EXISTING_DECYPHARR_IMAGE:-${DECYPHARR_IMAGE:-ghcr.io/sirrobot01/decypharr:v2.2}}"
+    local decypharr_image="${EXISTING_DECYPHARR_IMAGE:-${DECYPHARR_IMAGE:-cy01/blackhole:latest}}"
+    local prowlarr_image="${EXISTING_PROWLARR_IMAGE:-${PROWLARR_IMAGE:-lscr.io/linuxserver/prowlarr:latest}}"
+    local byparr_image="${EXISTING_BYPARR_IMAGE:-${BYPARR_IMAGE:-ghcr.io/thephaseless/byparr:latest}}"
+    local radarr_image="${EXISTING_RADARR_IMAGE:-${RADARR_IMAGE:-lscr.io/linuxserver/radarr:latest}}"
+    local sonarr_image="${EXISTING_SONARR_IMAGE:-${SONARR_IMAGE:-lscr.io/linuxserver/sonarr:latest}}"
+    local seerr_image="${EXISTING_SEERR_IMAGE:-${SEERR_IMAGE:-ghcr.io/seerr-team/seerr:latest}}"
+    local plex_image="${EXISTING_PLEX_IMAGE:-${PLEX_IMAGE:-lscr.io/linuxserver/plex:latest}}"
+    local jellyfin_image="${EXISTING_JELLYFIN_IMAGE:-${JELLYFIN_IMAGE:-lscr.io/linuxserver/jellyfin:latest}}"
 
     # Set the compose profile based on media server choice
     local compose_profile="plex"
@@ -925,6 +932,13 @@ PROWLARR_API_KEY="${PROWLARR_API_KEY}"
 DECYPHARR_USER="${DECYPHARR_USER:-torbox}"
 DECYPHARR_PASS="${DECYPHARR_PASS:-}"
 DECYPHARR_IMAGE="${decypharr_image}"
+PROWLARR_IMAGE="${prowlarr_image}"
+BYPARR_IMAGE="${byparr_image}"
+RADARR_IMAGE="${radarr_image}"
+SONARR_IMAGE="${sonarr_image}"
+SEERR_IMAGE="${seerr_image}"
+PLEX_IMAGE="${plex_image}"
+JELLYFIN_IMAGE="${jellyfin_image}"
 ENV_EOF
 
     # Preserve existing admin credentials if this is a re-run
@@ -2389,6 +2403,13 @@ EXISTING_SONARR_ADMIN_PASS=""
 EXISTING_PROWLARR_ADMIN_USER=""
 EXISTING_PROWLARR_ADMIN_PASS=""
 EXISTING_DECYPHARR_IMAGE=""
+EXISTING_PROWLARR_IMAGE=""
+EXISTING_BYPARR_IMAGE=""
+EXISTING_RADARR_IMAGE=""
+EXISTING_SONARR_IMAGE=""
+EXISTING_SEERR_IMAGE=""
+EXISTING_PLEX_IMAGE=""
+EXISTING_JELLYFIN_IMAGE=""
 
 check_existing_installation() {
     if [[ -f "${SETUP_COMPLETE_FILE}" ]]; then
@@ -2426,6 +2447,36 @@ check_existing_installation() {
         EXISTING_TORBOX_API_KEY=$(grep '^TORBOX_API_KEY=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
         EXISTING_COMPOSE_PROFILES=$(grep '^COMPOSE_PROFILES=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
         EXISTING_DECYPHARR_IMAGE=$(grep '^DECYPHARR_IMAGE=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+        EXISTING_PROWLARR_IMAGE=$(grep '^PROWLARR_IMAGE=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+        EXISTING_BYPARR_IMAGE=$(grep '^BYPARR_IMAGE=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+        EXISTING_RADARR_IMAGE=$(grep '^RADARR_IMAGE=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+        EXISTING_SONARR_IMAGE=$(grep '^SONARR_IMAGE=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+        EXISTING_SEERR_IMAGE=$(grep '^SEERR_IMAGE=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+        EXISTING_PLEX_IMAGE=$(grep '^PLEX_IMAGE=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+        EXISTING_JELLYFIN_IMAGE=$(grep '^JELLYFIN_IMAGE=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true
+
+        # Migrate old legacy image references to current defaults
+        case "${EXISTING_DECYPHARR_IMAGE}" in
+            ghcr.io/sirrobot01/decypharr:v2.2) EXISTING_DECYPHARR_IMAGE="" ;;
+        esac
+        case "${EXISTING_PROWLARR_IMAGE}" in
+            lscr.io/linuxserver/prowlarr:2.1.3) EXISTING_PROWLARR_IMAGE="" ;;
+        esac
+        case "${EXISTING_BYPARR_IMAGE}" in
+            ghcr.io/thephaseless/byparr:1.2.2) EXISTING_BYPARR_IMAGE="" ;;
+        esac
+        case "${EXISTING_RADARR_IMAGE}" in
+            lscr.io/linuxserver/radarr:5.22.4) EXISTING_RADARR_IMAGE="" ;;
+        esac
+        case "${EXISTING_SONARR_IMAGE}" in
+            lscr.io/linuxserver/sonarr:4.0.14) EXISTING_SONARR_IMAGE="" ;;
+        esac
+        case "${EXISTING_SEERR_IMAGE}" in
+            ghcr.io/seerr-team/seerr:2.4.1) EXISTING_SEERR_IMAGE="" ;;
+        esac
+        case "${EXISTING_JELLYFIN_IMAGE}" in
+            lscr.io/linuxserver/jellyfin:10.10.7) EXISTING_JELLYFIN_IMAGE="" ;;
+        esac
 
         # Extract existing admin credentials
         EXISTING_RADARR_ADMIN_USER=$(grep '^RADARR_ADMIN_USER=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'") || true

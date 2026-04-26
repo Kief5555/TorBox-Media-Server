@@ -13,7 +13,7 @@ services:
   # Mocks qBittorrent API for Radarr/Sonarr, connects to TorBox,
   # handles WebDAV mounting via built-in rclone, and creates symlinks.
   decypharr:
-    image: "${DECYPHARR_IMAGE:-ghcr.io/sirrobot01/decypharr:v2.2}"
+    image: "${DECYPHARR_IMAGE:-cy01/blackhole:latest}"
     container_name: decypharr
     restart: unless-stopped
     networks:
@@ -50,7 +50,7 @@ services:
   # ── Prowlarr ───────────────────────────────────────────────────
   # Indexer manager - feeds search results to Radarr & Sonarr.
   prowlarr:
-    image: lscr.io/linuxserver/prowlarr:2.1.3
+    image: "${PROWLARR_IMAGE:-lscr.io/linuxserver/prowlarr:latest}"
     container_name: prowlarr
     restart: unless-stopped
     networks:
@@ -81,7 +81,7 @@ services:
   # ── Byparr ────────────────────────────────────────────────────
   # Cloudflare bypass proxy (Byparr - drop-in FlareSolverr replacement).
   byparr:
-    image: ghcr.io/thephaseless/byparr:1.2.2
+    image: "${BYPARR_IMAGE:-ghcr.io/thephaseless/byparr:latest}"
     container_name: byparr
     restart: unless-stopped
     networks:
@@ -108,7 +108,7 @@ services:
   # Movie management - searches, grabs, and organizes movies.
   # Uses Decypharr as its download client (qBittorrent mock).
   radarr:
-    image: lscr.io/linuxserver/radarr:5.22.4
+    image: "${RADARR_IMAGE:-lscr.io/linuxserver/radarr:latest}"
     container_name: radarr
     restart: unless-stopped
     networks:
@@ -142,7 +142,7 @@ services:
   # TV show management - searches, grabs, and organizes series.
   # Uses Decypharr as its download client (qBittorrent mock).
   sonarr:
-    image: lscr.io/linuxserver/sonarr:4.0.14
+    image: "${SONARR_IMAGE:-lscr.io/linuxserver/sonarr:latest}"
     container_name: sonarr
     restart: unless-stopped
     networks:
@@ -175,7 +175,7 @@ services:
   # ── Seerr ───────────────────────────────────────────────────────
   # Media request & discovery frontend.
   seerr:
-    image: ghcr.io/seerr-team/seerr:2.4.1
+    image: "${SEERR_IMAGE:-ghcr.io/seerr-team/seerr:latest}"
     container_name: seerr
     user: "${PUID}:${PGID}"
     restart: unless-stopped
@@ -203,7 +203,7 @@ services:
   # Media server option 1 - streams your library to any device.
   # Activated via COMPOSE_PROFILES=plex in .env
   plex:
-    image: lscr.io/linuxserver/plex:1.41.5
+    image: "${PLEX_IMAGE:-lscr.io/linuxserver/plex:latest}"
     profiles: ["plex"]
     container_name: plex
     restart: unless-stopped
@@ -237,7 +237,7 @@ services:
   # Media server option 2 (open-source) - streams your library.
   # Activated via COMPOSE_PROFILES=jellyfin in .env
   jellyfin:
-    image: lscr.io/linuxserver/jellyfin:10.10.7
+    image: "${JELLYFIN_IMAGE:-lscr.io/linuxserver/jellyfin:latest}"
     profiles: ["jellyfin"]
     container_name: jellyfin
     restart: unless-stopped

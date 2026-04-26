@@ -318,11 +318,19 @@ test_image_versions_not_latest() {
         echo -e "${CYAN}[SKIP]${NC} Cannot find docker-compose.yml to check image versions"
         return
     fi
-    if grep -qE 'image:.*:latest' "$compose_file" 2>/dev/null; then
-        fail "Found Docker images using :latest tag"
-    else
-        pass "No Docker images use :latest tag"
-    fi
+
+    local line
+    while IFS= read -r line; do
+        # Skip template variables like "${SERVICE_IMAGE:-...}"
+        if [[ "$line" == *"\${"* && "$line" == *":latest"* ]]; then
+            continue
+        fi
+        if [[ "$line" == *":latest"* ]]; then
+            fail "Found Docker image using :latest tag: $line"
+            return
+        fi
+    done < <(grep '^[[:space:]]*image:' "$compose_file" 2>/dev/null)
+    pass "No Docker images use :latest tag"
 }
 
 # ============================================================================
